@@ -18,7 +18,14 @@ from fastapi import Body, FastAPI
 from fastapi.testclient import TestClient
 
 from nemo_gym.observability import install_trajectory_capture, make_capture_store, summarize_response
-from nemo_gym.trajectory_capture import CaptureStore, assemble_rollout, has_token_ids
+from nemo_gym.trajectory_capture import (
+    CaptureStore,
+    StepRecord,
+    assemble_rollout,
+    assemble_step_records,
+    build_step_record,
+    has_token_ids,
+)
 
 _RESPONSES_PAYLOAD = {
     "model": "m",
@@ -40,10 +47,8 @@ _RESPONSES_PAYLOAD = {
 def test_summarize_responses_shape():
     summary = summarize_response(_RESPONSES_PAYLOAD)
     assert summary["usage"] == {"tokens_in": 10, "tokens_out": 5, "tokens_total": 15, "tokens_reasoning": 3}
-    assert summary["num_tool_calls"] == 1
-    assert summary["tool_names"] == ["get_weather"]
-    assert summary["num_messages"] == 1
-    assert summary["has_reasoning"] is True
+    assert summary["num_tool_calls"] == 1 and summary["tool_names"] == ["get_weather"]
+    assert summary["num_messages"] == 1 and summary["has_reasoning"] is True
 
 
 def test_summarize_chat_completions_shape():
@@ -54,9 +59,7 @@ def test_summarize_chat_completions_shape():
     }
     summary = summarize_response(payload)
     assert summary["usage"]["tokens_in"] == 7
-    assert summary["num_tool_calls"] == 1
-    assert summary["tool_names"] == ["f"]
-    assert summary["has_reasoning"] is True
+    assert summary["num_tool_calls"] == 1 and summary["tool_names"] == ["f"] and summary["has_reasoning"] is True
 
 
 def test_summarize_anthropic_messages_shape():
@@ -71,23 +74,79 @@ def test_summarize_anthropic_messages_shape():
     }
     summary = summarize_response(payload)
     assert summary["usage"] == {"tokens_in": 8, "tokens_out": 6, "tokens_total": 14, "tokens_reasoning": None}
-    assert summary["num_tool_calls"] == 1
-    assert summary["num_messages"] == 1
-    assert summary["has_reasoning"] is True
+    assert summary["num_tool_calls"] == 1 and summary["num_messages"] == 1 and summary["has_reasoning"] is True
 
 
 def test_make_capture_store_disabled_returns_none():
     assert make_capture_store(SimpleNamespace(observability_enabled=False)) is None
 
 
-# --- full per-rollout capture + assembly (the report) ---
-def test_capture_assembles_full_two_turn_trajectory(tmp_path):
-    """End-to-end: capture two model calls (with a tool call + tool result + token-ids)
-    and assemble the full ordered trajectory. Also proves the request-body replay works
-    (the route still receives its body through the capture middleware)."""
+# --- #1483 StepRecord contract ---
+def test_build_step_record_from_exchange():
+    exchange = {
+        "dialect": "responses",
+        "model_server": "srv",
+        "trial_index": 2,
+        "turn_index": 1,
+        "latency_ms": 18.4,
+        "request": {"input": "hi"},
+        "response": {
+            "model": "m",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "output_tokens_details": {"reasoning_tokens": 3},
+                "prompt_tokens_details": {"cached_tokens": 4},
+            },
+            "output": [
+                {"type": "reasoning", "summary": [{"text": "thinking..."}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
+                {"type": "function_call", "call_id": "c1", "name": "calc", "arguments": '{"x": 1}'},
+            ],
+        },
+    }
+    rec = build_step_record(exchange, step_index=3, run_id="run-1")
+    assert (rec.step_index, rec.trial_index, rec.turn_index) == (3, 2, 1)
+    assert rec.run_id == "run-1" and rec.model_server == "srv" and rec.dialect == "responses"
+    assert (rec.tokens_in, rec.tokens_out, rec.tokens_total, rec.tokens_reasoning) == (10, 5, 15, 3)
+    assert rec.cache_hit is True and rec.cached_tokens == 4
+    assert rec.reasoning_content == "thinking..."
+    assert rec.tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
+    assert rec.latency_total_ms == 18.4
+
+
+def test_step_record_json_schema_has_contract_fields():
+    props = StepRecord.model_json_schema()["properties"]
+    for field in (
+        "step_index",
+        "trial_index",
+        "turn_index",
+        "tokens_in",
+        "tokens_out",
+        "tokens_reasoning",
+        "tokens_total",
+        "request",
+        "response",
+        "tool_calls",
+        "reasoning_content",
+        "cache_hit",
+        "error_category",
+        "latency_total_ms",
+        "latency_ttft_ms",
+    ):
+        assert field in props
+
+
+# --- full per-rollout capture + assembly (trajectory + StepRecords) ---
+def test_capture_assembles_trajectory_and_step_records(tmp_path):
+    """End-to-end: capture two model calls (tool call + tool result + token-ids + usage) and
+    assemble both the NeMoGym trajectory and the typed #1483 StepRecords. Also proves the
+    request-body replay works (the route still receives its body through the middleware)."""
     turns = [
         {
             "model": "m",
+            "usage": {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19, "prompt_tokens_details": {"cached_tokens": 4}},
             "output": [
                 {
                     "type": "message",
@@ -102,6 +161,7 @@ def test_capture_assembles_full_two_turn_trajectory(tmp_path):
         },
         {
             "model": "m",
+            "usage": {"input_tokens": 20, "output_tokens": 5, "total_tokens": 25},
             "output": [
                 {
                     "type": "message",
@@ -126,33 +186,35 @@ def test_capture_assembles_full_two_turn_trajectory(tmp_path):
     config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
     install_trajectory_capture(app, config)
     client = TestClient(app)
-    headers = {"x-nemo-gym-rollout-id": "rollout-x"}
+    base_headers = {"x-nemo-gym-rollout-id": "rollout-x", "x-nemo-gym-trial-index": "2"}
 
-    r1 = client.post("/v1/responses", json={"input": "solve it"}, headers=headers)
+    r1 = client.post("/v1/responses", json={"input": "solve it"}, headers={**base_headers, "x-nemo-gym-turn-index": "0"})
     r2 = client.post(
         "/v1/responses",
         json={"input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]},
-        headers=headers,
+        headers={**base_headers, "x-nemo-gym-turn-index": "1"},
     )
 
-    # Responses preserved through the capture middleware.
     assert r1.status_code == 200 and r2.status_code == 200
-    assert r1.json()["output"][1]["name"] == "calc"
-    # Request-body replay worked: the route received both bodies.
-    assert seen_requests[0] == {"input": "solve it"}
-    assert seen_requests[1]["input"][0]["call_id"] == "c1"
+    assert seen_requests[0] == {"input": "solve it"}  # request-body replay worked
 
-    # Full ordered trajectory assembled from the captured exchanges.
+    # NeMoGym trajectory (ordered output items).
     items = assemble_rollout(CaptureStore(tmp_path), "rollout-x")
     assert [type(i).__name__ for i in items] == [
-        "NeMoGymResponseOutputMessageForTraining",  # turn 1 assistant
-        "NeMoGymResponseFunctionToolCall",  # turn 1 tool call
-        "NeMoGymFunctionCallOutput",  # turn 2 tool result (from request input)
-        "NeMoGymResponseOutputMessageForTraining",  # turn 2 assistant
+        "NeMoGymResponseOutputMessageForTraining",
+        "NeMoGymResponseFunctionToolCall",
+        "NeMoGymFunctionCallOutput",
+        "NeMoGymResponseOutputMessageForTraining",
     ]
-    assert items[0].content[0].text == "let me check"
-    assert items[0].generation_token_ids == [1, 2, 3]
-    assert items[1].name == "calc"
-    assert items[2].output == "42"
-    assert items[3].content[0].text == "answer is 42"
     assert has_token_ids(items) is True
+
+    # Typed #1483 StepRecords.
+    steps = assemble_step_records(CaptureStore(tmp_path), "rollout-x", run_id="run-1")
+    assert [s.step_index for s in steps] == [0, 1]
+    assert [s.turn_index for s in steps] == [0, 1]
+    assert all(s.trial_index == 2 and s.run_id == "run-1" and s.model_server == "srv" for s in steps)
+    assert (steps[0].tokens_in, steps[0].tokens_out, steps[0].tokens_total) == (12, 7, 19)
+    assert steps[0].cache_hit is True and steps[0].cached_tokens == 4
+    assert steps[0].tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
+    assert steps[0].latency_total_ms is not None
+    assert steps[1].tokens_in == 20

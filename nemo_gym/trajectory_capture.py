@@ -29,7 +29,9 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
 
 from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
@@ -284,3 +286,176 @@ def has_token_ids(output_items: list[Any]) -> bool:
         if getattr(item, "generation_token_ids", None):
             return True
     return False
+
+
+# ----------------------------------------------------------------------------
+# #1483 step contract: typed StepRecord + builder
+# ----------------------------------------------------------------------------
+def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
+    """Normalize token totals across Responses, Chat Completions, and Anthropic Messages usage."""
+    if not usage:
+        return {"tokens_in": None, "tokens_out": None, "tokens_reasoning": None, "tokens_total": None}
+    tokens_in = usage.get("input_tokens")
+    if tokens_in is None:
+        tokens_in = usage.get("prompt_tokens")
+    tokens_out = usage.get("output_tokens")
+    if tokens_out is None:
+        tokens_out = usage.get("completion_tokens")
+    tokens_total = usage.get("total_tokens")
+    if tokens_total is None and tokens_in is not None and tokens_out is not None:
+        tokens_total = tokens_in + tokens_out
+    details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
+    return {
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "tokens_reasoning": details.get("reasoning_tokens"),
+        "tokens_total": tokens_total,
+    }
+
+
+def _cache_signal(usage: Any) -> tuple[Optional[bool], Optional[int]]:
+    """Cache hit/miss + cached-token count, from usage cache fields (OpenAI / Anthropic)."""
+    if not usage:
+        return None, None
+    details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+    cached = details.get("cached_tokens")
+    if cached is None:
+        cached = usage.get("cache_read_input_tokens")  # Anthropic
+    if cached is None:
+        return None, None
+    return cached > 0, cached
+
+
+def _as_arguments(arguments: Any) -> dict[str, Any]:
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments)
+        except Exception:
+            return {"_raw": arguments}
+    return {}
+
+
+def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """Structured tool calls (name, arguments, call_id) and reasoning text, across all three shapes."""
+    tool_calls: list[dict[str, Any]] = []
+    reasoning: list[str] = []
+
+    output = response.get("output")
+    if output is not None:  # Responses
+        for item in output:
+            if item.get("type") == "function_call":
+                tool_calls.append(
+                    {
+                        "call_id": item.get("call_id") or item.get("id"),
+                        "name": item.get("name"),
+                        "arguments": _as_arguments(item.get("arguments")),
+                    }
+                )
+            elif item.get("type") == "reasoning":
+                for summary in item.get("summary") or []:
+                    text = summary.get("text") if isinstance(summary, dict) else None
+                    if text:
+                        reasoning.append(text)
+        return tool_calls, ("\n".join(reasoning) or None)
+
+    choices = response.get("choices")
+    if choices is not None:  # Chat Completions
+        for choice in choices:
+            message = choice.get("message") if isinstance(choice, dict) else None
+            if not message:
+                continue
+            for tc in message.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                tool_calls.append(
+                    {"call_id": tc.get("id"), "name": fn.get("name"), "arguments": _as_arguments(fn.get("arguments"))}
+                )
+            if message.get("reasoning_content"):
+                reasoning.append(message["reasoning_content"])
+        return tool_calls, ("\n".join(reasoning) or None)
+
+    content = response.get("content")
+    if isinstance(content, list):  # Anthropic Messages
+        for block in content:
+            if block.get("type") == "tool_use":
+                tool_calls.append(
+                    {"call_id": block.get("id"), "name": block.get("name"), "arguments": block.get("input") or {}}
+                )
+            elif block.get("type") in ("thinking", "redacted_thinking") and block.get("thinking"):
+                reasoning.append(block["thinking"])
+        return tool_calls, ("\n".join(reasoning) or None)
+
+    return tool_calls, None
+
+
+class StepRecord(BaseModel):
+    """The #1483 per-step model-call contract. Field names align with OpenAI shapes.
+
+    One record per model call; aggregable to per-turn and per-trial totals. The full
+    per-trial trajectory is the StepRecords for a rollout ordered by (turn_index, step_index).
+    """
+
+    run_id: Optional[str] = None
+    trial_index: Optional[int] = None
+    turn_index: Optional[int] = None
+    step_index: int
+    model_server: Optional[str] = None
+    dialect: Optional[str] = None
+
+    # Token accounting (aggregable to per-turn / per-trial).
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    tokens_reasoning: Optional[int] = None
+    tokens_total: Optional[int] = None
+
+    # Model-call record.
+    request: Optional[dict[str, Any]] = None
+    response: Optional[dict[str, Any]] = None
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+
+    # Structured reasoning (not flattened into the response text).
+    reasoning_content: Optional[str] = None
+
+    # Cache visibility.
+    cache_hit: Optional[bool] = None
+    cached_tokens: Optional[int] = None
+
+    # Retry / error classification.
+    error_category: Optional[str] = None
+    retry_count: Optional[int] = None
+
+    # Latency.
+    latency_total_ms: Optional[float] = None
+    latency_ttft_ms: Optional[float] = None
+
+
+def build_step_record(exchange: dict[str, Any], *, step_index: int, run_id: Optional[str] = None) -> StepRecord:
+    """Map one captured exchange (dialect/request/response + metadata) into a typed StepRecord."""
+    response = exchange.get("response") or {}
+    tokens = extract_token_stats(response.get("usage"))
+    cache_hit, cached_tokens = _cache_signal(response.get("usage"))
+    tool_calls, reasoning_content = _tool_calls_and_reasoning(response)
+    return StepRecord(
+        run_id=run_id or exchange.get("run_id"),
+        trial_index=exchange.get("trial_index"),
+        turn_index=exchange.get("turn_index"),
+        step_index=step_index,
+        model_server=exchange.get("model_server"),
+        dialect=exchange.get("dialect"),
+        request=exchange.get("request"),
+        response=response or None,
+        tool_calls=tool_calls,
+        reasoning_content=reasoning_content,
+        cache_hit=cache_hit,
+        cached_tokens=cached_tokens,
+        error_category=exchange.get("error_category"),
+        retry_count=exchange.get("retry_count"),
+        latency_total_ms=exchange.get("latency_ms"),
+        **tokens,
+    )
+
+
+def assemble_step_records(store: CaptureStore, rollout_id: str, run_id: Optional[str] = None) -> list[StepRecord]:
+    """Read a rollout's captured exchanges into ordered StepRecords (the per-trial trajectory)."""
+    return [build_step_record(ex, step_index=i, run_id=run_id) for i, ex in enumerate(store.read(rollout_id))]

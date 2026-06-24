@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,12 +43,22 @@ logger = logging.getLogger(__name__)
 
 # A launcher or agent sets this header so exchanges can be grouped per task / rollout.
 ROLLOUT_HEADER = "x-nemo-gym-rollout-id"
+TRIAL_HEADER = "x-nemo-gym-trial-index"
+TURN_HEADER = "x-nemo-gym-turn-index"
 
 _OBSERVED_PATHS = {
     "/v1/responses": "responses",
     "/v1/chat/completions": "chat",
     "/v1/messages": "messages",
 }
+
+
+def _header_int(request: Any, name: str) -> Optional[int]:
+    value = request.headers.get(name)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ----------------------------------------------------------------------------
@@ -141,7 +152,7 @@ def _default_capture_dir(server_name: str) -> str:
 
 def make_capture_store(config: Any) -> Optional[CaptureStore]:
     """Build a CaptureStore when observability is enabled (default on); otherwise None."""
-    if not getattr(config, "observability_enabled", True):
+    if not getattr(config, "observability_enabled", False):
         return None
     root = getattr(config, "trajectory_capture_dir", None) or _default_capture_dir(
         getattr(config, "name", None) or "model_server"
@@ -179,8 +190,10 @@ def install_trajectory_capture(app: Any, config: Any) -> None:
 
         request._receive = _receive
 
+        start = time.perf_counter()
         response = await call_next(request)
         response_bytes = b"".join([chunk async for chunk in response.body_iterator])
+        latency_ms = (time.perf_counter() - start) * 1000.0
 
         try:
             if response.status_code < 400 and response_bytes:
@@ -189,6 +202,10 @@ def install_trajectory_capture(app: Any, config: Any) -> None:
                     rollout_id,
                     {
                         "dialect": dialect,
+                        "model_server": getattr(config, "name", None),
+                        "trial_index": _header_int(request, TRIAL_HEADER),
+                        "turn_index": _header_int(request, TURN_HEADER),
+                        "latency_ms": round(latency_ms, 2),
                         "request": json.loads(request_bytes) if request_bytes else None,
                         "response": json.loads(response_bytes),
                     },

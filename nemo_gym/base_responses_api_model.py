@@ -30,10 +30,10 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     observability_enabled: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "Emit one CLU trajectory record per model call (token stats, tool calls, "
-            "messages, reasoning). Default on; set false to opt out."
+            "Capture per-rollout model-call trajectories (token stats, tool calls, "
+            "messages, reasoning). Opt-in; off by default (per the #1483 contract)."
         ),
     )
     trajectory_capture_dir: Optional[str] = Field(
