@@ -12,15 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Rollout-keyed capture store and full-trajectory assembly.
+"""Rollout-keyed capture store, trajectory assembly, and the #1483 StepRecord.
 
-Salvaged from the (retired) sandbox capture proxy and rehomed for in-model-server
-capture: the server records every model exchange (request + response, including
-token-ids when the policy is a Gym model server) into a per-rollout JSONL file.
-One file per rollout — "one box = one rollout" — means a sandbox reaped mid-run
-cannot lose turns already streamed out (durable gather). The exchanges are read
-back and assembled into an ordered NeMoGym trajectory (full content for eval,
-per-turn token-ids for RL).
+- CaptureStore: append-only per-rollout JSONL of model exchanges (durable, fsynced).
+- assemble_trajectory / assemble_rollout: ordered NeMoGym output items.
+- StepRecord / build_step_record / assemble_step_records / aggregate_rollout_metrics:
+  the #1483 per-step contract and its per-rollout aggregates.
 """
 
 from __future__ import annotations
@@ -390,11 +387,7 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
 
 
 class StepRecord(BaseModel):
-    """The #1483 per-step model-call contract. Field names align with OpenAI shapes.
-
-    One record per model call; aggregable to per-turn and per-trial totals. The full
-    per-trial trajectory is the StepRecords for a rollout ordered by (turn_index, step_index).
-    """
+    """Per-step model-call record (#1483 contract); field names align with OpenAI shapes."""
 
     run_id: Optional[str] = None
     trial_index: Optional[int] = None
@@ -402,6 +395,7 @@ class StepRecord(BaseModel):
     step_index: int
     model_server: Optional[str] = None
     dialect: Optional[str] = None
+    status_code: Optional[int] = None
 
     # Token accounting (aggregable to per-turn / per-trial).
     tokens_in: Optional[int] = None
@@ -443,6 +437,7 @@ def build_step_record(exchange: dict[str, Any], *, step_index: int, run_id: Opti
         step_index=step_index,
         model_server=exchange.get("model_server"),
         dialect=exchange.get("dialect"),
+        status_code=exchange.get("status_code"),
         request=exchange.get("request"),
         response=response or None,
         tool_calls=tool_calls,
@@ -459,3 +454,23 @@ def build_step_record(exchange: dict[str, Any], *, step_index: int, run_id: Opti
 def assemble_step_records(store: CaptureStore, rollout_id: str, run_id: Optional[str] = None) -> list[StepRecord]:
     """Read a rollout's captured exchanges into ordered StepRecords (the per-trial trajectory)."""
     return [build_step_record(ex, step_index=i, run_id=run_id) for i, ex in enumerate(store.read(rollout_id))]
+
+
+def aggregate_rollout_metrics(store: CaptureStore, rollout_id: str) -> dict[str, Any]:
+    """Per-rollout token / latency / turn totals, for the existing per-rollout record (#1483)."""
+    steps = assemble_step_records(store, rollout_id)
+
+    def _sum(attr: str) -> Optional[float]:
+        values = [getattr(s, attr) for s in steps if getattr(s, attr) is not None]
+        return sum(values) if values else None
+
+    turns = {s.turn_index for s in steps if s.turn_index is not None}
+    return {
+        "tokens_in": _sum("tokens_in"),
+        "tokens_out": _sum("tokens_out"),
+        "tokens_reasoning": _sum("tokens_reasoning"),
+        "tokens_total": _sum("tokens_total"),
+        "latency_total_ms": _sum("latency_total_ms"),
+        "num_turns": len(turns) if turns else (len(steps) or None),
+        "num_steps": len(steps),
+    }

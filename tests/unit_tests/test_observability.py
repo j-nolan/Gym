@@ -21,6 +21,7 @@ from nemo_gym.observability import install_trajectory_capture, make_capture_stor
 from nemo_gym.trajectory_capture import (
     CaptureStore,
     StepRecord,
+    aggregate_rollout_metrics,
     assemble_rollout,
     assemble_step_records,
     build_step_record,
@@ -218,3 +219,32 @@ def test_capture_assembles_trajectory_and_step_records(tmp_path):
     assert steps[0].tool_calls == [{"call_id": "c1", "name": "calc", "arguments": {"x": 1}}]
     assert steps[0].latency_total_ms is not None
     assert steps[1].tokens_in == 20
+
+    # Per-rollout aggregates for the rollout record.
+    agg = aggregate_rollout_metrics(CaptureStore(tmp_path), "rollout-x")
+    assert agg["tokens_in"] == 32 and agg["tokens_out"] == 12
+    assert agg["num_turns"] == 2 and agg["num_steps"] == 2
+
+
+def test_failed_call_is_captured_with_error_category(tmp_path):
+    """A non-2xx model call is captured (replacing generic exception catching) with a
+    normalized error_category + status_code on the StepRecord."""
+    from fastapi.responses import JSONResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def _boom(body: dict = Body()) -> JSONResponse:
+        return JSONResponse(content={"error": "boom"}, status_code=500)
+
+    config = SimpleNamespace(observability_enabled=True, trajectory_capture_dir=str(tmp_path), name="srv")
+    install_trajectory_capture(app, config)
+    client = TestClient(app)
+
+    r = client.post("/v1/responses", json={"input": "x"}, headers={"x-nemo-gym-rollout-id": "r-err"})
+    assert r.status_code == 500  # response unchanged
+
+    steps = assemble_step_records(CaptureStore(tmp_path), "r-err")
+    assert len(steps) == 1
+    assert steps[0].error_category == "upstream_error"
+    assert steps[0].status_code == 500

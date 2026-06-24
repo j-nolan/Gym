@@ -14,16 +14,10 @@
 # limitations under the License.
 """Per-rollout trajectory capture for model servers.
 
-Default-on (opt out with ``observability_enabled: false``). A FastAPI middleware on
-the model server records every ``/v1/responses``, ``/v1/chat/completions`` and
-``/v1/messages`` exchange — full request + response, with token-ids when
-``return_token_id_information`` is on — into a per-rollout
-:class:`~nemo_gym.trajectory_capture.CaptureStore`, correlated via a request header.
-The captured exchanges assemble into a full ordered trajectory (content, tool calls,
-token-ids) via :func:`nemo_gym.trajectory_capture.assemble_rollout`.
-
-:func:`summarize_response` additionally offers a compact per-call telemetry view.
-Capture is best-effort and never affects the response returned to the caller.
+Opt-in FastAPI middleware (off by default). Records every /v1/responses,
+/v1/chat/completions and /v1/messages exchange into a per-rollout CaptureStore,
+correlated via request headers, including failed calls (classified error_category).
+Best-effort; never alters the response.
 """
 from __future__ import annotations
 
@@ -164,6 +158,70 @@ def make_capture_store(config: Any) -> Optional[CaptureStore]:
         return None
 
 
+def _classify_status(status_code: int) -> Optional[str]:
+    """Normalized error_category from an HTTP status (None when < 400)."""
+    if status_code < 400:
+        return None
+    if status_code in (408, 504):
+        return "timeout"
+    if status_code == 429:
+        return "rate_limit"
+    if status_code in (401, 403):
+        return "auth"
+    if status_code == 404:
+        return "not_found"
+    if status_code < 500:
+        return "client_error"
+    return "upstream_error"
+
+
+def _classify_exception(exc: BaseException) -> str:
+    """Normalized error_category for an exception raised while calling the model."""
+    import asyncio
+
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    name = type(exc).__name__.lower()
+    if "timeout" in name:
+        return "timeout"
+    if "conn" in name:
+        return "connection"
+    return "exception"
+
+
+def _record(
+    store: CaptureStore,
+    request: Any,
+    dialect: str,
+    config: Any,
+    request_bytes: bytes,
+    *,
+    response_body: Any,
+    status_code: Optional[int],
+    error_category: Optional[str],
+    latency_ms: float,
+) -> None:
+    """Append one exchange (success or failure). Best-effort: never raises."""
+    try:
+        rollout_id = request.headers.get(ROLLOUT_HEADER) or "rollout"
+        store.record(
+            rollout_id,
+            {
+                "dialect": dialect,
+                "model_server": getattr(config, "name", None),
+                "trial_index": _header_int(request, TRIAL_HEADER),
+                "turn_index": _header_int(request, TURN_HEADER),
+                "latency_ms": round(latency_ms, 2),
+                "status_code": status_code,
+                "error_category": error_category,
+                "request": json.loads(request_bytes) if request_bytes else None,
+                "response": response_body,
+            },
+        )
+    except Exception:
+        logger.warning("Trajectory capture failed for one %s call.", dialect, exc_info=True)
+
+
 def install_trajectory_capture(app: Any, config: Any) -> None:
     """Add the per-rollout exchange-capture middleware to a model-server app (no-op when disabled).
 
@@ -191,27 +249,34 @@ def install_trajectory_capture(app: Any, config: Any) -> None:
         request._receive = _receive
 
         start = time.perf_counter()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # Capture the failed step (replaces generic exception catching), then propagate.
+            _record(
+                store, request, dialect, config, request_bytes,
+                response_body=None,
+                status_code=None,
+                error_category=_classify_exception(exc),
+                latency_ms=(time.perf_counter() - start) * 1000.0,
+            )
+            raise
+
         response_bytes = b"".join([chunk async for chunk in response.body_iterator])
         latency_ms = (time.perf_counter() - start) * 1000.0
-
-        try:
-            if response.status_code < 400 and response_bytes:
-                rollout_id = request.headers.get(ROLLOUT_HEADER) or "rollout"
-                store.record(
-                    rollout_id,
-                    {
-                        "dialect": dialect,
-                        "model_server": getattr(config, "name", None),
-                        "trial_index": _header_int(request, TRIAL_HEADER),
-                        "turn_index": _header_int(request, TURN_HEADER),
-                        "latency_ms": round(latency_ms, 2),
-                        "request": json.loads(request_bytes) if request_bytes else None,
-                        "response": json.loads(response_bytes),
-                    },
-                )
-        except Exception:
-            logger.warning("Trajectory capture failed for one %s call.", dialect, exc_info=True)
+        response_body = None
+        if response_bytes:
+            try:
+                response_body = json.loads(response_bytes)
+            except Exception:
+                response_body = None
+        _record(
+            store, request, dialect, config, request_bytes,
+            response_body=response_body,
+            status_code=response.status_code,
+            error_category=_classify_status(response.status_code),
+            latency_ms=latency_ms,
+        )
 
         headers = dict(response.headers)
         headers.pop("content-length", None)  # Response() recomputes it from the buffered body
