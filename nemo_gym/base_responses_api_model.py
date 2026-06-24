@@ -13,9 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
+from typing import Optional
 
 from fastapi import Body, FastAPI
+from pydantic import Field
 
+from nemo_gym.observability import install_trajectory_capture
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -26,7 +29,20 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    pass
+    observability_enabled: bool = Field(
+        default=True,
+        description=(
+            "Emit one CLU trajectory record per model call (token stats, tool calls, "
+            "messages, reasoning). Default on; set false to opt out."
+        ),
+    )
+    trajectory_capture_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "Directory for per-rollout trajectory-capture JSONL. Defaults to $NEMO_GYM_TRAJECTORY_DIR, "
+            "else a per-server dir under the system temp dir."
+        ),
+    )
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -42,6 +58,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/chat/completions")(self.chat_completions)
 
         app.post("/v1/responses")(self.responses)
+
+        # Default-on per-rollout trajectory capture (opt out via observability_enabled=false).
+        # Installed as an exchange-capturing middleware, so it is independent of each server's
+        # handler signature and never alters the response.
+        install_trajectory_capture(app, self.config)
 
         return app
 
