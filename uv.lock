@@ -1453,11 +1453,9 @@ dev = [
     { name = "ruff" },
 ]
 sandbox = [
+    { name = "boto3" },
     { name = "opensandbox" },
     { name = "tenacity" },
-]
-sandbox-ecs = [
-    { name = "boto3" },
 ]
 
 [package.dev-dependencies]
@@ -1477,7 +1475,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.3" },
-    { name = "boto3", marker = "extra == 'sandbox-ecs'", specifier = ">=1.34" },
+    { name = "boto3", marker = "extra == 'sandbox'", specifier = ">=1.34" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'" },
     { name = "datasets" },
     { name = "devtools" },
@@ -1516,7 +1514,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "yappi" },
 ]
-provides-extras = ["sandbox", "sandbox-ecs", "dev"]
+provides-extras = ["sandbox", "dev"]
 
 [package.metadata.requires-dev]
 docs = [
