@@ -14,11 +14,10 @@ anyswe_openclaw:
         timeout: 1800
         setup_timeout: 300
         thinking: "off"
-        # Persist OpenClaw's session/trajectory to the harness's host-mounted per-task dir
-        # (anyswe binds the persistent_dir at /trajectories_mount), so the full trace survives
-        # the agent's workspace cleanup -- the raw session jsonl, not just the parsed response.json.
-        env:
-          OPENCLAW_STATE_DIR: /trajectories_mount/openclaw-state
+        # Run OpenClaw's transient workspace off /testbed so it never pollutes the graded git diff.
+        # Trace persistence is handled by the agent pointing HOME at the mounted /trajectories_mount
+        # dir (see openclaw_agent/app.py) -- do NOT set OPENCLAW_STATE_DIR, it breaks config loading.
+        workspace_root: /tmp/openclaw_ws
         system_prompt: "You are fixing a bug in the repository at /testbed. Use your tools to inspect and edit the source files. Make the minimal correct code change, run relevant checks if practical, and leave the final fix applied in /testbed."
         openclaw_config:
           agents:

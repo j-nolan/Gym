@@ -336,7 +336,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         """setup and run agent. returns (output_items, usage, model_name)."""
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
-        home = work_dir / ".openclaw-home"
+        # Persist OpenClaw's home (which holds BOTH the merged config under .openclaw/openclaw.json
+        # AND the session/trajectory) on the harness-mounted per-task dir when present, so the full
+        # trace survives this method's work_dir cleanup. HOME (not OPENCLAW_STATE_DIR) must point
+        # here: the merged config is written to $HOME/.openclaw/openclaw.json and OpenClaw reads it
+        # from there -- redirecting only the state dir would load the bare setup default (no model).
+        trajectories_mount = Path("/trajectories_mount")
+        home = (trajectories_mount / "openclaw-home") if trajectories_mount.is_dir() else (work_dir / ".openclaw-home")
         home.mkdir(parents=True, exist_ok=True)
         env = self._env(home)
 
@@ -375,6 +381,14 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             if code:
                 LOG.warning("openclaw exited %d: %s", code, stderr)
             LOG.debug("openclaw stdout (%d chars): %s", len(stdout), stdout[:2000])
+            # Persist the raw CLI invocation + output next to the session for diagnosis (kept when
+            # home is on the mounted per-task dir; harmless otherwise).
+            try:
+                (home / "openclaw-run.log").write_text(
+                    f"$ {shlex.join(cmd)}\n[exit {code}]\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}\n"
+                )
+            except Exception:
+                pass
 
             fallback_items, usage = parse_openclaw_output(stdout)
             envelope = _decode_last_json_dict_suffix(stdout)
