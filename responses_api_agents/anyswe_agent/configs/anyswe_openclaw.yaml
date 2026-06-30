@@ -10,10 +10,15 @@ anyswe_openclaw:
       agent_server_class: OpenClawAgent
       agent_config_class: OpenClawAgentConfig
       agent_kwargs:
-        model: nvinf/nvidia/qwen/qwen3.6-35b-a3b
+        model: nvinf/nvidia/nvidia/nemotron-3-ultra
         timeout: 1800
         setup_timeout: 300
         thinking: "off"
+        # Persist OpenClaw's session/trajectory to the harness's host-mounted per-task dir
+        # (anyswe binds the persistent_dir at /trajectories_mount), so the full trace survives
+        # the agent's workspace cleanup -- the raw session jsonl, not just the parsed response.json.
+        env:
+          OPENCLAW_STATE_DIR: /trajectories_mount/openclaw-state
         system_prompt: "You are fixing a bug in the repository at /testbed. Use your tools to inspect and edit the source files. Make the minimal correct code change, run relevant checks if practical, and leave the final fix applied in /testbed."
         openclaw_config:
           agents:
@@ -34,6 +39,9 @@ anyswe_openclaw:
                 - id: nvidia/qwen/qwen3.6-35b-a3b
                   name: nvidia/qwen/qwen3.6-35b-a3b
                   api: openai-completions
+                - id: nvidia/nvidia/nemotron-3-ultra
+                  name: nvidia/nvidia/nemotron-3-ultra
+                  api: openai-completions
                 - id: nvidia/moonshotai/kimi-k2.6
                   name: nvidia/moonshotai/kimi-k2.6
                   api: openai-completions
@@ -41,8 +49,12 @@ anyswe_openclaw:
                   name: aws/anthropic/bedrock-claude-opus-4-7
                   api: openai-completions
 
-      container_formatter: data/sifs/{instance_id}.sif
-      sandbox_provider: {apptainer: {}}
+      # docker:// => EnrootProvider imports each image to a cached .sqsh on first use.
+      # For pre-staged local images instead, point this at an ABSOLUTE dir of raw-id-named
+      # squashes, e.g. /path/to/sqsh/{instance_id}.sqsh -- anyswe only treats a formatter as a
+      # local image when it ends in .sif or starts with '/' or '.', so the path must be absolute.
+      container_formatter: docker://swebench/sweb.eval.x86_64.{instance_id}
+      sandbox_provider: {enroot: {}}
       swebench_agent_timeout: 2100
       swebench_tests_timeout: 1800
       concurrency: 2
