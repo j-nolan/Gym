@@ -45,6 +45,7 @@ from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.docker import DockerSandboxProvider
+from nemo_gym.sandbox.providers.enroot import EnrootProvider
 from responses_api_agents.swe_env.harness import SweTask
 from responses_api_agents.swe_env.self_drive import provision_and_collect
 from responses_api_agents.swe_env.verify_task import verify_task
@@ -519,6 +520,25 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             create_cfg["extra_start_args"] = start_args
             appt["create"] = create_cfg
             return ApptainerProvider(**appt)
+        if name == "enroot":
+            # Same per-instance binds as the apptainer/docker branches (the runner expects
+            # /trajectories_mount, /nemo_gym_mount, /agent_deps_mount). enroot applies them as
+            # --mount on every `enroot start`, via exec.default_binds. Unlike apptainer, enroot's
+            # rootfs is natively writable (no overlay needed) and it does not bind the host $HOME
+            # (no --no-mount home needed), so /testbed is editable as-is.
+            enr = {
+                k: v
+                for k, v in (self.config.sandbox_provider.get("enroot") or {}).items()
+                if k in ("exec", "create", "probe")
+            }
+            exec_cfg = dict(enr.get("exec") or {})
+            exec_cfg["default_binds"] = list(exec_cfg.get("default_binds") or []) + [
+                f"{params.persistent_dir}:/trajectories_mount",
+                f"{params.nemo_gym_root}:/nemo_gym_mount:ro",
+                f"{params.agent_deps_dir}:/agent_deps_mount:ro",
+            ]
+            enr["exec"] = exec_cfg
+            return EnrootProvider(**enr)
         if name != "docker":
             return self.config.sandbox_provider
         return DockerSandboxProvider(
