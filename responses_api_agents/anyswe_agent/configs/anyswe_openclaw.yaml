@@ -31,6 +31,10 @@ anyswe_openclaw:
                 api: openai-completions
                 baseUrl: ${policy_base_url}
                 apiKey: ${policy_api_key}
+                # Provider idle (no-response) timeout. nemotron-3-ultra can be slow to first token
+                # under load; the 120s default aborts mid-run. 900s rides out slow responses
+                # (the endpoint's silent stalls are the known bottleneck -- also run low concurrency).
+                timeoutSeconds: 900
                 models:
                 - id: azure/openai/gpt-5.4
                   name: azure/openai/gpt-5.4
