@@ -38,9 +38,11 @@ anyswe_openclaw:
                 api: openai-completions
                 baseUrl: ${policy_base_url}
                 apiKey: ${policy_api_key}
-                # Provider idle (no-response) timeout. With context bounded (contextTokens above),
-                # prefill is fast (~2-3s), so 300s is ample margin for the occasional slow response.
-                timeoutSeconds: 300
+                # Provider idle (no-response) timeout, set just above the endpoint's own ~6:00-6:30
+                # hard cap so the client never pre-empts the server: a slow request runs until the
+                # endpoint returns or kills it, never aborted early. (Non-binding under contextTokens
+                # bound -- requests are ~2s -- but correct for any latency-tail config.)
+                timeoutSeconds: 390
                 models:
                 - id: azure/openai/gpt-5.4
                   name: azure/openai/gpt-5.4
