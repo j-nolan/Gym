@@ -51,6 +51,14 @@ anyswe_openclaw:
                 - id: nvidia/nvidia/nemotron-3-ultra
                   name: nvidia/nvidia/nemotron-3-ultra
                   api: openai-completions
+                  # Nemotron-3-ultra is a reasoning model (endpoint returns reasoning_content and
+                  # accepts reasoning_effort). Declare it so OpenClaw allows thinking!=off and sends
+                  # reasoning_effort=<level>. thinking=off maps to null => baseline behavior unchanged.
+                  reasoning: true
+                  thinkingLevelMap: {"off": null, low: low, medium: medium, high: high}
+                  compat:
+                    supportsReasoningEffort: true
+                    supportedReasoningEfforts: [low, medium, high]
                 - id: nvidia/moonshotai/kimi-k2.6
                   name: nvidia/moonshotai/kimi-k2.6
                   api: openai-completions
