@@ -231,11 +231,17 @@ class EnrootProvider:
     async def _resolve_sqsh(self, image: str) -> str:
         """Return a local .sqsh path for ``image``, importing from docker:// on first use.
 
-        A local ``.sqsh`` path is used verbatim. Anything else is treated as a
-        docker reference and imported (once, serialized) into the image cache.
+        A local ``.sqsh`` path (or any absolute/relative filesystem path) is used verbatim and
+        MUST exist. Anything else is treated as a docker reference and imported (once, serialized)
+        into the image cache.
         """
-        if image.endswith(".sqsh") and os.path.exists(image):
-            return image
+        # A local squashfs image is used verbatim and must exist. Do NOT fall back to a docker
+        # import of the path (that produces a bogus ``docker:///abs/path.sqsh`` reference and a
+        # confusing "invalid image reference" error) -- fail clearly instead.
+        if image.endswith(".sqsh") or image.startswith(("/", "./", "../")):
+            if os.path.exists(image):
+                return image
+            raise EnrootCreateError(f"enroot: local sqsh image not found: {image}")
         ref = image[len("docker://") :] if image.startswith("docker://") else image
         safe = ref.replace("/", "+").replace(":", "+")
         sqsh = self._cache_dir() / f"{safe}.sqsh"
