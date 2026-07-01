@@ -230,6 +230,12 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     extra_args: list[str] = []
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
     openclaw_version: Optional[str] = None
+    # Retry the whole OpenClaw run when it comes back with too few tool calls -- i.e. the endpoint
+    # returned an empty response or stalled (idle-timeout) before the agent did any work. Those are
+    # flaky-endpoint failures, not model failures; a fresh run recovers them. Real attempts make
+    # dozens of tool calls, empty/stalled ones make 0-1, so the threshold cleanly separates them.
+    empty_retries: int = 2
+    min_tool_calls_ok: int = 2
 
     @property
     def command_parts(self) -> list[str]:
@@ -416,11 +422,28 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
-        try:
-            output_items, usage, model_name = await self._run_openclaw(user_message, system_prompt)
-        except TimeoutError:
-            LOG.warning("OpenClaw timed out, padding empty output so the rollout scores instead of erroring")
-            output_items, usage, model_name = [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
+        output_items, usage, model_name = [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
+        for attempt in range(self.config.empty_retries + 1):
+            try:
+                output_items, usage, model_name = await self._run_openclaw(user_message, system_prompt)
+            except TimeoutError:
+                LOG.warning("OpenClaw timed out (attempt %d/%d)", attempt + 1, self.config.empty_retries + 1)
+                output_items = []
+            n_tool_calls = sum(
+                1
+                for it in output_items
+                if (getattr(it, "type", None) or (it.get("type") if isinstance(it, dict) else None)) == "function_call"
+            )
+            if n_tool_calls >= self.config.min_tool_calls_ok:
+                break
+            if attempt < self.config.empty_retries:
+                LOG.warning(
+                    "OpenClaw run made %d tool calls (< %d): likely empty/stalled endpoint, retrying (attempt %d/%d)",
+                    n_tool_calls,
+                    self.config.min_tool_calls_ok,
+                    attempt + 1,
+                    self.config.empty_retries + 1,
+                )
 
         if not output_items:
             LOG.warning("OpenClaw produced no assistant message. Padding empty output")
