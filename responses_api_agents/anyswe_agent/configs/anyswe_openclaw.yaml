@@ -23,6 +23,13 @@ anyswe_openclaw:
           agents:
             defaults:
               workspace: /testbed
+              # Context control -- the top harness knob for Nemotron. Bound the working window so
+              # compaction/pruning fire early and prompts stay small: fast prefill + better decisions.
+              # (Unbounded, context ballooned to ~140K tokens -> ~2-min prefill -> 120s client aborts;
+              # see the timeout investigation. Verified backend-side: latency is prefill/TTFT-bound.)
+              contextTokens: 40000
+              contextLimits:
+                toolResultMaxChars: 16000
           tools:
             profile: coding
           models:
@@ -31,10 +38,9 @@ anyswe_openclaw:
                 api: openai-completions
                 baseUrl: ${policy_base_url}
                 apiKey: ${policy_api_key}
-                # Provider idle (no-response) timeout. nemotron-3-ultra can be slow to first token
-                # under load; the 120s default aborts mid-run. 900s rides out slow responses
-                # (the endpoint's silent stalls are the known bottleneck -- also run low concurrency).
-                timeoutSeconds: 900
+                # Provider idle (no-response) timeout. With context bounded (contextTokens above),
+                # prefill is fast (~2-3s), so 300s is ample margin for the occasional slow response.
+                timeoutSeconds: 300
                 models:
                 - id: azure/openai/gpt-5.4
                   name: azure/openai/gpt-5.4
@@ -60,7 +66,8 @@ anyswe_openclaw:
       sandbox_provider: {enroot: {}}
       swebench_agent_timeout: 2100
       swebench_tests_timeout: 1800
-      concurrency: 2
+      # Bounded context => fast prefill => safe to parallelize (stalls came from big-context prefill).
+      concurrency: 3
 
       datasets:
         - name: example
