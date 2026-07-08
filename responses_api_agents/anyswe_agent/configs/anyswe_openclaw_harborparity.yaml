@@ -1,0 +1,55 @@
+anyswe_openclaw_harborparity:
+  responses_api_agents:
+    anyswe_agent:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench run by OpenClaw natively inside the task container.
+      value: Eval software engineering capabilities on SWE-bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.openclaw_agent.app
+      agent_server_class: OpenClawAgent
+      agent_config_class: OpenClawAgentConfig
+      agent_kwargs:
+        model: nvinf/nvidia/nvidia/nemotron-3-ultra
+        timeout: 1800
+        setup_timeout: 300
+        thinking: "high"
+        openclaw_config:
+          agents:
+            defaults:
+              workspace: /testbed
+              params: {temperature: 1.0}
+          tools:
+            deny: ["message"]
+          models:
+            providers:
+              nvinf:
+                api: openai-completions
+                baseUrl: ${policy_base_url}
+                apiKey: ${policy_api_key}
+                # harbor default; the slurm-evaluations overlay raises it to 390 for the nvinf
+                # endpoint, whose slow prefill aborts at 120s
+                timeoutSeconds: 120
+                models:
+                - id: nvidia/nvidia/nemotron-3-ultra
+                  name: nvidia/nvidia/nemotron-3-ultra
+                  api: openai-completions
+                  # required for thinking != off, else OpenClaw rejects the thinking level
+                  reasoning: true
+                  thinkingLevelMap: {"off": null, low: low, medium: medium, high: high}
+                  compat:
+                    supportsReasoningEffort: true
+                    supportedReasoningEfforts: [low, medium, high]
+
+      container_formatter: ${oc.env:WORKSPACE_ROOT}/images/{instance_id}.sif
+      # keep --no-mount home,cwd: otherwise each task container mounts the Gym root (its CWD)
+      # writable, and an agent's pip install corrupts the shared deps prefix for every concurrent task
+      sandbox_provider: {apptainer: {create: {apply_resource_limits: false, extra_start_args: ["--userns", "--no-mount", "home,cwd"]}}}
+      swebench_agent_timeout: 2100
+      swebench_tests_timeout: 1800
+      concurrency: 2
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl
