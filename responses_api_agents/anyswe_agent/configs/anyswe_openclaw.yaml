@@ -10,7 +10,9 @@ anyswe_openclaw:
       agent_server_class: OpenClawAgent
       agent_config_class: OpenClawAgentConfig
       agent_kwargs:
-        model: nvinf/nvidia/nvidia/nemotron-3-ultra
+        # model comes from run_eval's -m flag (policy_model_name); nvinf-prefixed here, bare id/name
+        # in the models array below. Pass e.g. -m nvidia/nvidia/nemotron-3-ultra or -3-super-v3.
+        model: nvinf/${policy_model_name}
         timeout: 1800
         setup_timeout: 300
         thinking: "high"
@@ -31,8 +33,8 @@ anyswe_openclaw:
                 # endpoint, whose slow prefill aborts at 120s
                 timeoutSeconds: 120
                 models:
-                - id: nvidia/nvidia/nemotron-3-ultra
-                  name: nvidia/nvidia/nemotron-3-ultra
+                - id: ${policy_model_name}
+                  name: ${policy_model_name}
                   api: openai-completions
                   # required for thinking != off, else OpenClaw rejects the thinking level
                   reasoning: true
