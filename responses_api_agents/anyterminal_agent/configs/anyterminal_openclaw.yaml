@@ -1,4 +1,5 @@
-# Terminal Bench with OpenClaw driving Nemotron-3-super-v3.
+# Terminal Bench with OpenClaw driving a Nemotron model (choose with run_eval's -m flag, e.g.
+# -m nvidia/nvidia/nemotron-3-ultra or -3-super-v3).
 #
 # Agent parameters mirror harbor's OpenClaw adapter (harbor/agents/installed/openclaw.py):
 # thinking high, workspace ".", gateway local, tools.deny ["message"], setup 1200s, and no
@@ -9,7 +10,7 @@
 # The reasoning/thinkingLevelMap/compat block is required because we route through a custom nvinf
 # provider; harbor gets the same reasoning behavior implicitly from its built-in nvidia provider.
 
-anyterminal_openclaw_super:
+anyterminal_openclaw:
   responses_api_agents:
     anyterminal_agent:
       entrypoint: app.py
@@ -21,7 +22,9 @@ anyterminal_openclaw_super:
       agent_server_class: OpenClawAgent
       agent_config_class: OpenClawAgentConfig
       agent_kwargs:
-        model: nvinf/nvidia/nvidia/nemotron-3-super-v3
+        # model comes from run_eval's -m flag (policy_model_name); nvinf-prefixed here, bare id/name
+        # in the models array below. Pass e.g. -m nvidia/nvidia/nemotron-3-ultra or -3-super-v3.
+        model: nvinf/${policy_model_name}
         thinking: "high"
         setup_timeout: 1200
         timeout: 3600
@@ -41,8 +44,8 @@ anyterminal_openclaw_super:
                 apiKey: ${policy_api_key}
                 timeoutSeconds: 120
                 models:
-                - id: nvidia/nvidia/nemotron-3-super-v3
-                  name: nvidia/nvidia/nemotron-3-super-v3
+                - id: ${policy_model_name}
+                  name: ${policy_model_name}
                   api: openai-completions
                   reasoning: true
                   thinkingLevelMap: {"off": null, low: low, medium: medium, high: high}
