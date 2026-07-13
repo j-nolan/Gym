@@ -16,6 +16,8 @@ anyswe_openclaw:
         timeout: 1800
         setup_timeout: 300
         thinking: "high"
+        # pin OpenClaw: unset installs @latest, which drifts across runs and breaks reproducibility
+        openclaw_version: "2026.6.11"
         openclaw_config:
           agents:
             defaults:
