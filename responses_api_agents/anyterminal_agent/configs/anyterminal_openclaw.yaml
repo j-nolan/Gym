@@ -28,6 +28,8 @@ anyterminal_openclaw:
         thinking: "high"
         setup_timeout: 1200
         timeout: 3600
+        # pin OpenClaw: unset installs @latest, which drifts across runs and breaks reproducibility
+        openclaw_version: "2026.6.11"
         openclaw_config:
           agents:
             defaults:
