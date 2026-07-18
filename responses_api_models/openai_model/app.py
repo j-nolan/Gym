@@ -80,6 +80,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
+        body_dict.pop("stream", None)  # non-streaming server: never forward a stream flag upstream
         if self.config.drop_input_reasoning_items:
             input_items = body_dict.get("input")
             if isinstance(input_items, list):
@@ -95,6 +96,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     ) -> NeMoGymChatCompletion:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
+        body_dict.pop("stream", None)  # non-streaming server: never forward a stream flag upstream
         async with self._semaphore:
             openai_response_dict = await self._client.create_chat_completion(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)

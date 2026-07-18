@@ -334,7 +334,7 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     top_p: Optional[float] = None
     truncation: Optional[Literal["auto", "disabled"]] = None
     user: Optional[str] = None
-    stream: Optional[Literal[False]] = None
+    stream: Optional[bool] = None  # accept stream=true; server forwards non-streaming (drops the flag)
 
 
 ########################################
@@ -507,7 +507,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     top_p: Optional[float] = None
     user: Optional[str] = None
     web_search_options: Optional[WebSearchOptions] = None
-    stream: Optional[Literal[False]] = None
+    stream: Optional[bool] = None  # accept stream=true; server forwards non-streaming (drops the flag)
 
     # Disallow deprecated args
     # function_call: FunctionCall
