@@ -168,6 +168,11 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     temperature: float | None = None
     terminal_backend: str = "local"
     terminal_timeout: int = 180
+    # hermes-agent picks its non-stream stale timeout from an allowlist keyed on the model name.
+    # It never matches here: the name it receives is model_server.name ("policy_model"), not the
+    # served model, so every model silently falls back to the 90s chat default and long reasoning
+    # turns are abandoned mid-flight. Setting it explicitly outranks that lookup.
+    api_call_stale_timeout: int = 600
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
@@ -254,6 +259,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         # process-global, so multiple HermesAgent instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend
         os.environ["TERMINAL_TIMEOUT"] = str(self.config.terminal_timeout)
+        os.environ["HERMES_API_CALL_STALE_TIMEOUT"] = str(self.config.api_call_stale_timeout)
 
         # Build config.yaml with config parameters
         hermes_home = tempfile.mkdtemp(prefix="hermes_agent_")
