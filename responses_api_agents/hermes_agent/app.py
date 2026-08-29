@@ -168,7 +168,12 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     temperature: float | None = None
     terminal_backend: str = "local"
     terminal_timeout: int = 180
-    system_prompt: Optional[str] = None
+    # Experiment (INTA turn-budget test): Terminal-Bench sends no system message, so this
+    # adds one rather than replacing anything. The budget is stated, not enforced -
+    # max_turns is unchanged, so turn count stays free to exceed it and be measured.
+    system_prompt: Optional[str] = (
+        "You have a budget of 50 turns to complete this task. Use them efficiently."
+    )
     compression_enabled: bool = True
     compression_threshold: float = 0.85
     delegation_max_iterations: int = 50
