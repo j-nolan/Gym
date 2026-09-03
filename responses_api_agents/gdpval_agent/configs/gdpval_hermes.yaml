@@ -65,10 +65,9 @@ gdpval_hermes:
       agent_kwargs:
         # 250 is what stirrup_agent allows; 90 cut off 17 of 220 tasks mid-work.
         max_turns: 250
-        # Matches stirrup_agent, the benchmark's own harness, which caps at the context window.
-        # Lower values are not merely tighter: hermes abandons the whole task when a response is
-        # truncated mid-reasoning, so a cap that bites costs the task rather than the turn.
-        max_tokens: 262144
+        # Deliberately unset. Hermes abandons the task when a response comes back truncated, so
+        # both a tight cap and a cap at the context window lose the task: 32768 exhausted the
+        # budget on reasoning, 262144 left no headroom under the prompt and truncated every reply.
         terminal_backend: local
         terminal_timeout: 600
         # execute_code runs on the harness interpreter, which lacks the document libraries;
