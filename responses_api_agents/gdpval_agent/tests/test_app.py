@@ -78,9 +78,15 @@ def test_deliverable_extensions_are_kept(name):
     assert is_deliverable(name)
 
 
-@pytest.mark.parametrize("name", ["build.py", "run.sh", "agent.log", "notes.ipynb"])
+@pytest.mark.parametrize("name", ["agent.log", "mod.pyc", "mod.pyo"])
 def test_scratch_extensions_are_dropped(name):
     assert not is_deliverable(name)
+
+
+@pytest.mark.parametrize("name", ["build.py", "run.sh", "notes.ipynb", "app.tsx", "draft.eml"])
+def test_source_files_are_deliverables(name):
+    """The software tasks ask for code, so a source file is the deliverable."""
+    assert is_deliverable(name)
 
 
 def test_persist_dir_must_be_absolute(tmp_path):
@@ -125,7 +131,7 @@ class _StubBox:
 @pytest.mark.asyncio
 async def test_collect_flattens_and_drops_scratch_files(tmp_path):
     agent = _agent(_config(tmp_path))
-    box = _StubBox(["/workspace/output/report.docx\n/workspace/output/sub/data.xlsx\n/workspace/output/gen.py\n"])
+    box = _StubBox(["/workspace/output/report.docx\n/workspace/output/sub/data.xlsx\n/workspace/output/run.log\n"])
     target = tmp_path / "out"
 
     collected = await agent._collect(box, target)
@@ -133,6 +139,18 @@ async def test_collect_flattens_and_drops_scratch_files(tmp_path):
     assert collected == 2
     assert sorted(p.name for p in target.iterdir()) == ["data.xlsx", "report.docx"]
     assert not any(p.is_dir() for p in target.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_collect_skips_build_directories(tmp_path):
+    agent = _agent(_config(tmp_path))
+    box = _StubBox(["/workspace/output/app.tsx\n/workspace/output/node_modules/dep/package.json\n"])
+    target = tmp_path / "out"
+
+    collected = await agent._collect(box, target)
+
+    assert collected == 1
+    assert [p.name for p in target.iterdir()] == ["app.tsx"]
 
 
 @pytest.mark.asyncio

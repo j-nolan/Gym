@@ -45,7 +45,13 @@ from responses_api_agents.stirrup_agent.tasks.gdpval import _download_reference_
 _RUNNER_SOURCE_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "gdpval_user_prompt.txt"
 
-_SCRATCH_SUFFIXES = frozenset({".py", ".sh", ".pyc", ".log", ".ipynb", ".pyo"})
+# Only what is never a deliverable. Source files are the deliverable for the software tasks,
+# so .py stays harvestable and .ipynb is not scratch.
+_SCRATCH_SUFFIXES = frozenset({".pyc", ".pyo", ".log"})
+# Directories a build leaves behind. One task shipped 1497 node_modules files, which flattened
+# into the target and exceeded the judge's context limit.
+_EXCLUDED_DIRS = frozenset({"node_modules", ".git", "__pycache__", ".venv", "venv", ".cache"})
+_MAX_DELIVERABLES = 100
 _DELIVERABLE_SUFFIXES = frozenset(
     {
         ".docx",
@@ -74,6 +80,24 @@ _DELIVERABLE_SUFFIXES = frozenset(
         ".mp4",
         ".wav",
         ".zip",
+        ".eml",
+        ".ipynb",
+        ".py",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".css",
+        ".sol",
+        ".circom",
+        ".yaml",
+        ".yml",
+        ".sql",
+        ".sh",
+        ".step",
+        ".stp",
+        ".psd",
+        ".tex",
     }
 )
 
@@ -287,6 +311,11 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             name = Path(remote).name
             if not is_deliverable(name):
                 continue
+            if _EXCLUDED_DIRS.intersection(Path(remote).parts):
+                continue
+            if collected >= _MAX_DELIVERABLES:
+                print(f"[gdpval_agent] stopping at {_MAX_DELIVERABLES} deliverables", flush=True)
+                break
             # The scorer lists this directory non-recursively, so everything lands flat.
             dest = target / name
             if dest.exists():
@@ -348,6 +377,13 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                     if result.return_code != 0:
                         details = (result.stderr or result.stdout or "")[-2000:]
                         print(f"[gdpval_agent] harness exited {result.return_code}: {details}", flush=True)
+                    else:
+                        # A clean exit still hides why the loop stopped: hermes swallows its own
+                        # error whenever any assistant message exists, so an abandoned run looks
+                        # identical to a finished one in the persisted rollout.
+                        tail = (result.stderr or "")[-1500:].strip()
+                        if tail:
+                            print(f"[gdpval_agent] harness stderr: {tail}", flush=True)
 
                     response = await self._load_response(box, Path(scratch) / "response.json")
                     target = self._deliverables_dir(body)
