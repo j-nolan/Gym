@@ -64,6 +64,9 @@ gdpval_hermes:
       agent_config_class: HermesAgentConfig
       agent_kwargs:
         max_turns: 90
+        # Uncapped, a model that starts repeating itself generates until it hits the context
+        # limit, which costs the whole task rather than one turn.
+        max_tokens: 32768
         terminal_backend: local
         terminal_timeout: 600
         # execute_code runs on the harness interpreter, which lacks the document libraries;
