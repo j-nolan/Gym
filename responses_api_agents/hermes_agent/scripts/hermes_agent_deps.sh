@@ -24,8 +24,13 @@ HERMES_NIX_BUILD=1 "$DEPS_DIR/bin/python3" -m pip install "$HERMES_SPEC"
 # hermes-agent pins openai==2.24.0, which conflicts with nemo-gym's own openai==2.44.0 pin
 # (see pyproject.toml); the install above downgrades it. Reinstall nemo-gym's pinned openai
 # last, with --no-deps, so it wins without re-triggering the same resolver conflict.
-OPENAI_PIN="$(grep -oE '"openai==[0-9.]+"' "$NEMO_GYM_ROOT/pyproject.toml" | tr -d '"')"
+OPENAI_PIN="$(grep -oE '"openai==[0-9.]+"' "$NEMO_GYM_ROOT/pyproject.toml" | tr -d '"' | sort -u)"
 : "${OPENAI_PIN:?could not read openai pin from $NEMO_GYM_ROOT/pyproject.toml}"
+if [ "$(printf '%s\n' "$OPENAI_PIN" | wc -l)" -ne 1 ]; then
+    echo "ERROR: expected exactly one distinct openai pin in $NEMO_GYM_ROOT/pyproject.toml, got:" >&2
+    printf '%s\n' "$OPENAI_PIN" >&2
+    exit 1
+fi
 "$DEPS_DIR/bin/python3" -m pip install --force-reinstall --no-deps "$OPENAI_PIN"
 
 "$DEPS_DIR/bin/python3" -c "import model_tools; from run_agent import AIAgent; print('hermes-agent OK')"
