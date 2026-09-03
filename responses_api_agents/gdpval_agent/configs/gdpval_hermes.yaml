@@ -63,10 +63,12 @@ gdpval_hermes:
       agent_server_class: HermesAgent
       agent_config_class: HermesAgentConfig
       agent_kwargs:
-        max_turns: 90
-        # Uncapped, a model that starts repeating itself generates until it hits the context
-        # limit, which costs the whole task rather than one turn.
-        max_tokens: 32768
+        # 250 is what stirrup_agent allows; 90 cut off 17 of 220 tasks mid-work.
+        max_turns: 250
+        # Matches stirrup_agent, the benchmark's own harness, which caps at the context window.
+        # Lower values are not merely tighter: hermes abandons the whole task when a response is
+        # truncated mid-reasoning, so a cap that bites costs the task rather than the turn.
+        max_tokens: 262144
         terminal_backend: local
         terminal_timeout: 600
         # execute_code runs on the harness interpreter, which lacks the document libraries;
