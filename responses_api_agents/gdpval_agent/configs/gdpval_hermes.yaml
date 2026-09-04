@@ -71,12 +71,13 @@ gdpval_hermes:
         terminal_backend: local
         terminal_timeout: 600
         # execute_code runs on the harness interpreter, which lacks the document libraries;
-        # the terminal reaches the container python that has them. The vision and desktop
-        # toolsets cannot work headless, and vision_analyze would route deliverables to a
-        # third-party endpoint rather than the configured one. browser stays enabled because
-        # it is what carries web_search.
+        # the terminal reaches the container python that has them. desktop and computer_use
+        # cannot work headless. browser stays enabled because it is what carries web_search.
+        # vision and video are enabled: the served checkpoint carries a vision tower, and with
+        # provider "openai" hermes attaches images to the policy model itself rather than
+        # routing them to a separate vision endpoint.
         disabled_toolsets:
-          ["code_execution", "memory", "vision", "video", "computer_use", "desktop_ui", "project"]
+          ["code_execution", "memory", "computer_use", "desktop_ui", "project"]
 
       image: ${oc.env:GDPVAL_CONTAINER_PATH,}
       container_workdir: /workspace

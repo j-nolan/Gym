@@ -229,7 +229,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         config: dict[str, Any] = {
             "model": self._model_name(),
-            "provider": "auto",
+            # Not "auto" or "vllm": hermes gates images in tool results on an allowlist of
+            # provider names (tools/vision_tools.py::_supports_media_in_tool_results), and only
+            # "openai" matches what gym actually fronts, an OpenAI-compatible chat endpoint.
+            # Anything else silently downgrades images to a text description.
+            "provider": "openai",
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
             "memory": {
