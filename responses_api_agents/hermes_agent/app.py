@@ -234,13 +234,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             # "openai" matches what gym actually fronts, an OpenAI-compatible chat endpoint.
             # Anything else silently downgrades images to a text description.
             "provider": "openai",
-            # vision_analyze only registers when a vision route resolves
-            # (tools/vision_tools.py::check_vision_requirements). The auto chain asks
-            # models.dev whether the main model can see, our served checkpoints are not in that
-            # catalogue, and the remaining hops are third-party vision providers we have no
-            # credentials for, so the tool silently disappears and the model is told it does not
-            # exist. This is the documented escape hatch for VLMs absent from the catalogue.
-            "providers": {"openai": {"models": {self._model_name(): {"supports_vision": True}}}},
+            "providers": {"openai": self._vision_provider_config()},
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
             "memory": {
@@ -279,6 +273,39 @@ class HermesAgent(SimpleResponsesAPIAgent):
         with open(os.path.join(hermes_home, "config.yaml"), "w") as _f:
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
+
+    def _vision_provider_config(self) -> dict[str, Any]:
+        """Provider entry that lets ``vision_analyze`` register.
+
+        The tool is gated on ``check_vision_requirements()``, which asks whether a vision client
+        could be built. Declaring the capability is necessary but not sufficient: our served
+        checkpoints are absent from the models.dev catalogue, so without ``supports_vision`` the
+        probe skips the policy model and falls through to third-party vision providers we hold no
+        credentials for; and without an endpoint it cannot construct a client either, because the
+        probe runs before the live endpoint is recorded. Verified both ways: capability alone
+        leaves the check False, capability plus endpoint makes it True.
+        """
+        entry: dict[str, Any] = {"models": {self._model_name(): {"supports_vision": True}}}
+        entry["api_key"] = self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym")  # pragma: allowlist secret
+        base_url = self._vision_base_url()
+        if base_url:
+            entry["base_url"] = base_url
+        else:
+            LOG.warning("no model base url for the vision probe; vision_analyze will not register")
+        return entry
+
+    def _vision_base_url(self) -> Optional[str]:
+        if self.config.model_server is None:
+            return None
+        try:
+            return self.resolve_model_base_url(self.config.model_server.name)
+        except Exception:
+            # A sandboxed run constructs the agent with an empty global config, so the server
+            # lookup raises KeyError. The injected client still knows the endpoint it was given.
+            try:
+                return self.server_client._build_server_base_url({})
+            except Exception:
+                return None
 
     def _model_name(self) -> str:
         return self.config.model or str(self.config.model_server.name)
