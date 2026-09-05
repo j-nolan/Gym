@@ -73,9 +73,8 @@ gdpval_hermes:
         # execute_code runs on the harness interpreter, which lacks the document libraries;
         # the terminal reaches the container python that has them. desktop and computer_use
         # cannot work headless. browser stays enabled because it is what carries web_search.
-        # vision and video are enabled: the served checkpoint carries a vision tower, and with
-        # provider "openai" hermes attaches images to the policy model itself rather than
-        # routing them to a separate vision endpoint.
+        # vision is not listed here because it is not disabled by name: the tool is gated on a
+        # resolvable vision route instead, which hermes_agent supplies with supports_vision.
         disabled_toolsets:
           ["code_execution", "memory", "computer_use", "desktop_ui", "project"]
 

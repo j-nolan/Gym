@@ -234,6 +234,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
             # "openai" matches what gym actually fronts, an OpenAI-compatible chat endpoint.
             # Anything else silently downgrades images to a text description.
             "provider": "openai",
+            # vision_analyze only registers when a vision route resolves
+            # (tools/vision_tools.py::check_vision_requirements). The auto chain asks
+            # models.dev whether the main model can see, our served checkpoints are not in that
+            # catalogue, and the remaining hops are third-party vision providers we have no
+            # credentials for, so the tool silently disappears and the model is told it does not
+            # exist. This is the documented escape hatch for VLMs absent from the catalogue.
+            "providers": {"openai": {"models": {self._model_name(): {"supports_vision": True}}}},
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
             "memory": {
