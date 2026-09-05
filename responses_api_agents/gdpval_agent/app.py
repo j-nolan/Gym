@@ -35,7 +35,6 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import get_response_json, raise_for_status
@@ -236,17 +235,21 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             return image
         return image.removeprefix("docker://")
 
-    def _model_url(self) -> str:
+    def _model_url(self, rollout_id: Optional[str]) -> str:
         if not self.config.model_server:
             return ""
-        cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
-        return self.server_client._build_server_base_url(cfg)
+        # Rollout-prefixed, so the model server can attribute the harness's calls to this rollout.
+        # The bare base URL reaches the same server but files the calls under no rollout at all.
+        return self.resolve_model_base_url(self.config.model_server.name, rollout_id)
 
     def _paths(self) -> tuple[str, str, str, str]:
         wd = self.config.container_workdir.rstrip("/")
         return wd, f"{wd}/input", f"{wd}/output", f"{wd}/.nv"
 
-    def _build_spec(self, body: GDPValAgentRunRequest, instruction: str, image: str, deps_dir: Path) -> SandboxSpec:
+    def _build_spec(
+        self, body: GDPValAgentRunRequest, instruction: str, image: str, deps_dir: Path,
+        rollout_id: Optional[str],
+    ) -> SandboxSpec:
         wd, _, _, traj = self._paths()
         extra = dict(self.config.sandbox_spec)
         provider_options = dict(extra.pop("provider_options", {}) or {})
@@ -259,7 +262,8 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             image=image,
             workdir=wd,
             env={
-                "GDPVAL_MODEL_URL": self._model_url(),
+                "GDPVAL_MODEL_URL": self._model_url(rollout_id),
+                "GDPVAL_ROLLOUT_ID": rollout_id or "",
                 "GDPVAL_MODEL_NAME": body.responses_create_params.model or "model",
                 "GDPVAL_AGENT_KWARGS": json.dumps(self.config.agent_kwargs),
                 "GDPVAL_AGENT_HOME": f"{wd}/.home",
@@ -331,6 +335,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         raise NotImplementedError("the harness runs inside the sandbox and serves its own responses endpoint")
 
     async def run(self, request: Request, body: GDPValAgentRunRequest) -> GDPValAgentVerifyResponse:
+        rollout_id = self.rollout_id_from_run(body)
         extra = body.model_extra or {}
         task_prompt = extra.get("prompt") or ""
         reference_files = _parse_json_str(extra.get("reference_files") or [], [])
@@ -359,7 +364,7 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                 local_refs = sorted(p for p in staged.rglob("*") if p.is_file())
                 container_refs = [f"{input_dir}/{p.relative_to(staged).as_posix()}" for p in local_refs]
                 instruction = build_user_prompt(task_prompt, container_refs, output_dir)
-                spec = self._build_spec(body, instruction, self._image, self._deps_dir)
+                spec = self._build_spec(body, instruction, self._image, self._deps_dir, rollout_id)
 
                 async with AsyncSandbox(self._sandbox_provider, spec) as box:
                     await box.start()

@@ -42,6 +42,7 @@ def prepare_environment() -> None:
 def main() -> None:
     prepare_environment()
     model_url = os.environ.get("GDPVAL_MODEL_URL", "")
+    rollout_id = os.environ.get("GDPVAL_ROLLOUT_ID", "")
     model_name = os.environ["GDPVAL_MODEL_NAME"]
     traj_dir = os.environ["GDPVAL_TRAJ_DIR"]
     instruction = Path(traj_dir, "instruction.txt").read_text()
@@ -92,7 +93,9 @@ def main() -> None:
         messages.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
     body = NeMoGymResponseCreateParamsNonStreaming(input=messages, model=model_name, **sampling)
 
-    request = SimpleNamespace(path_params={})
+    # Harnesses branch on this: without a rollout id they take an uninstrumented path that
+    # reports zero tokens and emits no observations, which is what a bare {} used to select.
+    request = SimpleNamespace(path_params={"rollout_id": rollout_id} if rollout_id else {})
     response = asyncio.run(agent.responses(request=request, body=body))
     Path(traj_dir, "response.json").write_text(response.model_dump_json())
     print(f"agent finished: {len(response.output)} output items", flush=True)

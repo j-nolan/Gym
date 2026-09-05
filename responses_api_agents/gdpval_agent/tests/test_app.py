@@ -106,10 +106,32 @@ def test_deliverables_dir_defaults_to_first_repeat(tmp_path):
     assert agent._deliverables_dir(body).parts[-1] == "repeat_0"
 
 
+def test_rollout_id_reaches_the_sandbox(tmp_path, monkeypatch):
+    agent = _agent(_config(tmp_path))
+    monkeypatch.setattr(
+        type(agent), "resolve_model_base_url",
+        lambda self, name, rollout_id=None: f"http://host/ng-rollout/{rollout_id}/v1",
+    )
+    body = GDPValAgentRunRequest(responses_create_params={"input": []})
+    spec = agent._build_spec(body, "instruction", "/abs/gdpval.sif", tmp_path / "deps", "roll-7")
+    assert spec.env["GDPVAL_ROLLOUT_ID"] == "roll-7"
+    assert spec.env["GDPVAL_MODEL_URL"] == "http://host/ng-rollout/roll-7/v1"
+
+
+def test_sandbox_env_tolerates_no_rollout_id(tmp_path, monkeypatch):
+    agent = _agent(_config(tmp_path))
+    monkeypatch.setattr(
+        type(agent), "resolve_model_base_url", lambda self, name, rollout_id=None: "http://host/v1"
+    )
+    body = GDPValAgentRunRequest(responses_create_params={"input": []})
+    spec = agent._build_spec(body, "instruction", "/abs/gdpval.sif", tmp_path / "deps", None)
+    assert spec.env["GDPVAL_ROLLOUT_ID"] == ""
+
+
 def test_deps_prefix_is_bound_read_only(tmp_path):
     agent = _agent(_config(tmp_path, model_server=None))
     body = GDPValAgentRunRequest(responses_create_params={"input": []})
-    spec = agent._build_spec(body, "instruction", "/abs/gdpval.sif", tmp_path / "deps")
+    spec = agent._build_spec(body, "instruction", "/abs/gdpval.sif", tmp_path / "deps", None)
     assert f"{tmp_path / 'deps'}:/agent_deps_mount:ro" in spec.provider_options["binds"]
 
 
