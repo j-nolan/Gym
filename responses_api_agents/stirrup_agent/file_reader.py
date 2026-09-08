@@ -138,11 +138,48 @@ def _read_text(fpath: Path) -> str:
     return fpath.read_text(encoding="utf-8", errors="replace").strip()
 
 
-def _read_docx(fpath: Path) -> str:
-    from docx import Document
+_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
-    doc = Document(str(fpath))
-    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+def _read_docx(fpath: Path) -> str:
+    """Read a .docx including tracked changes and comments.
+
+    python-docx's ``Paragraph.text`` walks only ``w:p/w:r/w:t``, so it silently drops insertions,
+    deletions and comments. Those are the deliverable for a redlining task, so read the XML.
+    """
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    def walk(node, out, in_ins=False, in_del=False):
+        for child in node:
+            tag = child.tag
+            if tag == f"{_W_NS}ins":
+                walk(child, out, True, in_del)
+            elif tag == f"{_W_NS}del":
+                walk(child, out, in_ins, True)
+            else:
+                if tag == f"{_W_NS}t" and child.text:
+                    out.append(f"[inserted: {child.text}]" if in_ins else child.text)
+                elif tag == f"{_W_NS}delText" and child.text:
+                    out.append(f"[deleted: {child.text}]")
+                walk(child, out, in_ins, in_del)
+                if tag == f"{_W_NS}p":
+                    out.append("\n")
+
+    with zipfile.ZipFile(fpath) as zf:
+        names = set(zf.namelist())
+        parts: list[str] = []
+        if "word/document.xml" in names:
+            body: list[str] = []
+            walk(ET.fromstring(zf.read("word/document.xml")), body)
+            parts.append("".join(body).strip())
+        if "word/comments.xml" in names:
+            notes: list[str] = []
+            walk(ET.fromstring(zf.read("word/comments.xml")), notes)
+            text = "".join(notes).strip()
+            if text:
+                parts.append(f"--- reviewer comments ---\n{text}")
+    return "\n\n".join(p for p in parts if p)
 
 
 def _read_pdf(fpath: Path) -> str:
@@ -331,7 +368,13 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
                     blocks.append({"type": "text", "text": f"\n{fpath.name}:\n{text}"})
 
             elif ext in OFFICE_EXTS:
-                pdf_path = _convert_office_to_pdf(fpath)
+                # A raising converter (missing or unrunnable libreoffice) must not skip the text
+                # fallback below, or the judge is told the deliverable errored rather than read.
+                try:
+                    pdf_path = _convert_office_to_pdf(fpath)
+                except Exception as conv_exc:
+                    print(f"[file_reader] office conversion failed for {fpath.name}: {conv_exc}", flush=True)
+                    pdf_path = None
                 if pdf_path and pdf_path.exists():
                     converted_pdfs.append(pdf_path)
                     data = pdf_path.read_bytes()
