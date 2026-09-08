@@ -172,6 +172,9 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     # turns are abandoned mid-flight. Setting it explicitly outranks that lookup; left unset the
     # harness keeps its own default.
     api_call_stale_timeout: Optional[int] = None
+    # Hermes caps web_search calls per turn (default 50). A benchmark that runs a whole task as
+    # one turn hits it as a whole-task ceiling, and tripping it ends the turn. 0 disables.
+    max_web_searches_per_turn: Optional[int] = None
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
@@ -259,6 +262,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
+        if self.config.max_web_searches_per_turn is not None:
+            config["tool_loop_guardrails"] = {"loop_caps": {"max_web_searches": self.config.max_web_searches_per_turn}}
         if self.config.supports_vision:
             config["providers"] = {"openai": self._vision_provider_config()}
         return yaml.dump(config, default_flow_style=False)
@@ -555,9 +560,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
-            raw_observations = (
-                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
-            )
+            raw_observations = agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
             observations = (
                 AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
             )
