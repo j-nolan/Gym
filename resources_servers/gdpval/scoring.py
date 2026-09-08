@@ -236,6 +236,7 @@ async def score_with_rubric_visual(
     judges: list[ResolvedJudge],
     rng: Optional[random.Random] = None,
     include_raw_responses: bool = False,
+    deliverable_text: str = "",
 ) -> tuple[float, dict | None]:
     """Score deliverables visually using a multimodal judge (e.g., Gemini 3 Pro).
 
@@ -261,7 +262,9 @@ async def score_with_rubric_visual(
         judge_prompt_template,
         task_prompt=task_prompt,
         rubric=rubric_str,
-        deliverable_text="[Deliverable files are attached below as PDFs/images.]",
+        # A file the block builder cannot render still has to be named, or the judge concludes
+        # the deliverable is missing when it is present.
+        deliverable_text=deliverable_text or "[Deliverable files are attached below as PDFs/images.]",
     )
 
     # Build multimodal content: prompt text + file content blocks

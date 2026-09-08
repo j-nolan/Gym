@@ -439,6 +439,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 judges=judges,
                 rng=rng,
                 include_raw_responses=self.config.persist_raw_judge_responses,
+                deliverable_text=deliverable_text,
             )
         else:
             from resources_servers.gdpval.scoring import score_with_rubric
