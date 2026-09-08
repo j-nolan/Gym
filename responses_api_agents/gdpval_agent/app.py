@@ -446,8 +446,17 @@ class GDPValAgent(SimpleResponsesAPIAgent):
             return NeMoGymResponse.model_validate_json(local.read_text())
         except Exception as e:
             print(f"[gdpval_agent] could not load harness response: {e}", flush=True)
+            # A wall-clock kill leaves only the entrypoint's signal flush. Without this the
+            # rollout records zero output items and reads as an empty generation.
+            try:
+                await box.download(f"{traj}/response.partial.json", local)
+                partial = NeMoGymResponse.model_validate_json(local.read_text())
+                print("[gdpval_agent] recovered a partial response after a kill", flush=True)
+                return partial
+            except Exception:
+                pass
             return NeMoGymResponse(
-                id="gdpval-agent-error",
+                id="gdpval-agent-killed",
                 created_at=0.0,
                 model="error",
                 object="response",

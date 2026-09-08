@@ -18,8 +18,10 @@ import asyncio
 import importlib
 import json
 import os
+import signal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 
 def prepare_environment() -> None:
@@ -96,6 +98,22 @@ def main() -> None:
     # Harnesses branch on this: without a rollout id they take an uninstrumented path that
     # reports zero tokens and emits no observations, which is what a bare {} used to select.
     request = SimpleNamespace(path_params={"rollout_id": rollout_id} if rollout_id else {})
+
+    # The per-task wall clock kills this process mid-loop, and a response written only after the
+    # loop returns is lost, taking the whole trace with it. Flush on the signal instead.
+    state: dict[str, Any] = {"agent": agent}
+
+    def _flush(signum, _frame):
+        partial = getattr(state["agent"], "_ng_partial_response", None)
+        Path(traj_dir, "response.partial.json").write_text(
+            partial.model_dump_json() if partial is not None else json.dumps({"killed_by": signum})
+        )
+        print(f"agent killed by signal {signum}; wrote response.partial.json", flush=True)
+        os._exit(143)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _flush)
+
     response = asyncio.run(agent.responses(request=request, body=body))
     Path(traj_dir, "response.json").write_text(response.model_dump_json())
     print(f"agent finished: {len(response.output)} output items", flush=True)
