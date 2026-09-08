@@ -34,6 +34,8 @@ from typing import Any
 
 
 MAX_TOTAL_CHARS = 20_000
+# Ceiling on the text blocks one deliverable set may contribute to a judge request.
+MAX_BLOCK_TEXT_CHARS = 100_000
 
 
 def read_deliverable_files(output_dir: str) -> str:
@@ -89,8 +91,10 @@ def read_deliverable_files(output_dir: str) -> str:
 
 def _extract_text(fpath: Path, ext: str) -> str:
     """Dispatch to the right extractor based on file extension."""
-    if ext in (".txt", ".md", ".csv", ".json", ".html", ".xml", ".log"):
+    if ext in TEXT_EXTS:
         return _read_text(fpath)
+    elif ext in ARCHIVE_EXTS:
+        return _read_archive(fpath)
     elif ext == ".docx":
         return _read_docx(fpath)
     elif ext == ".pdf":
@@ -102,6 +106,32 @@ def _extract_text(fpath: Path, ext: str) -> str:
     else:
         size = os.path.getsize(fpath)
         return f"[Binary file: {fpath.name}, {size} bytes]"
+
+
+def _read_archive(fpath: Path) -> str:
+    """List an archive and inline the text members, since rubrics score what is inside."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(fpath) as zf:
+            names = [i.filename for i in zf.infolist() if not i.is_dir()]
+            parts = [f"[Archive: {fpath.name}, {len(names)} entries]", *(f"  {n}" for n in names)]
+            budget = MAX_TOTAL_CHARS
+            for name in names:
+                if Path(name).suffix.lower() not in TEXT_EXTS or budget <= 0:
+                    continue
+                try:
+                    body = zf.read(name).decode("utf-8", errors="replace").strip()
+                except Exception:
+                    continue
+                if not body:
+                    continue
+                body = body[:budget]
+                budget -= len(body)
+                parts.append(f"\n--- {name} ---\n{body}")
+            return "\n".join(parts)
+    except Exception as exc:
+        return f"[Unreadable archive: {fpath.name}: {exc}]"
 
 
 def _read_text(fpath: Path) -> str:
@@ -160,9 +190,39 @@ def _read_pptx(fpath: Path) -> str:
 # PDF conversion for visual judging (Gemini 3 Pro)
 # ---------------------------------------------------------------------------
 
-OFFICE_EXTS = {".docx", ".pptx", ".xlsx"}
-TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".yaml", ".yml", ".py", ".sh", ".log"}
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}
+# LibreOffice converts these to PDF so the judge sees rendered formatting.
+OFFICE_EXTS = {".docx", ".pptx", ".xlsx", ".doc", ".ppt", ".xls", ".odt", ".odp", ".ods", ".rtf"}
+# Anything the judge can read as source. Extensions absent from every set used to produce no
+# content block at all, so a deliverable in one of them was scored as if it did not exist.
+TEXT_EXTS = {
+    ".txt",
+    ".md",
+    ".csv",
+    ".json",
+    ".xml",
+    ".html",
+    ".yaml",
+    ".yml",
+    ".py",
+    ".sh",
+    ".log",
+    ".ipynb",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".css",
+    ".sql",
+    ".sol",
+    ".circom",
+    ".tex",
+    ".step",
+    ".stp",
+    ".eml",
+    ".svg",
+}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".gif"}
+ARCHIVE_EXTS = {".zip"}
 
 MIME_TYPES = {
     ".pdf": "application/pdf",
@@ -172,6 +232,7 @@ MIME_TYPES = {
     ".webp": "image/webp",
     ".heic": "image/heic",
     ".heif": "image/heif",
+    ".gif": "image/gif",
 }
 
 
@@ -254,6 +315,8 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
     blocks: list[dict[str, Any]] = []
     converted_pdfs: list[Path] = []  # track for cleanup
 
+    text_budget = MAX_BLOCK_TEXT_CHARS
+
     for fpath in sorted(output_path.iterdir()):
         if not fpath.is_file():
             continue
@@ -262,8 +325,9 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
 
         try:
             if ext in TEXT_EXTS:
-                text = fpath.read_text(encoding="utf-8", errors="replace").strip()
+                text = fpath.read_text(encoding="utf-8", errors="replace").strip()[:text_budget]
                 if text:
+                    text_budget -= len(text)
                     blocks.append({"type": "text", "text": f"\n{fpath.name}:\n{text}"})
 
             elif ext in OFFICE_EXTS:
@@ -307,6 +371,14 @@ def convert_deliverables_to_content_blocks(output_dir: str) -> list[dict[str, An
                         "image_url": {"url": f"data:{mime};base64,{b64}"},
                     }
                 )
+
+            else:
+                # Without this the judge is told nothing at all about the file, and reports the
+                # deliverable as missing when it is present on disk.
+                text = _extract_text(fpath, ext)[:text_budget]
+                if text:
+                    text_budget -= len(text)
+                    blocks.append({"type": "text", "text": f"\n{fpath.name}:\n{text}"})
         except Exception as exc:
             blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
 
