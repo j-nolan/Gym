@@ -187,6 +187,10 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # Most office docs render poorly as raw text; PDFs let multimodal judges
     # read tables/charts. Costs ~5-30s per Office file.
     preconvert_office_to_pdf: bool = True
+    # Rubric mode sends one request per task, so an oversized inline deliverable fails the whole
+    # verify rather than one block. Above these a file is named to the judge but not attached.
+    rubric_max_inline_file_bytes: int = 20 * 1024 * 1024
+    rubric_max_text_chars_per_file: int = 100_000
     preconvert_max_concurrent: int = 4
 
     judge_model_server: ModelServerRef
@@ -391,19 +395,28 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         deliverable_text = _safe_output_text(body.response)
         deliverable_content_blocks: Optional[List[Dict[str, Any]]] = None
+        clean_up_list: List[Path] = []
 
         if body.deliverables_dir and Path(body.deliverables_dir).is_dir():
-            from responses_api_agents.stirrup_agent.file_reader import (
-                convert_deliverables_to_content_blocks,
-                read_deliverable_files,
-            )
+            from resources_servers.gdpval.comparison import IGNORE_FILES, build_file_section
+            from responses_api_agents.stirrup_agent.file_reader import read_deliverable_files
 
             read = read_deliverable_files(body.deliverables_dir)
             if read:
                 deliverable_text = read
-            blocks = convert_deliverables_to_content_blocks(body.deliverables_dir)
-            if blocks:
-                deliverable_content_blocks = blocks
+            deliverables = [
+                p for p in Path(body.deliverables_dir).iterdir() if p.is_file() and p.name not in IGNORE_FILES
+            ]
+            if deliverables:
+                if self.config.preconvert_office_to_pdf:
+                    await self._preconvert_and_log(Path(body.deliverables_dir), label=f"rubric/{body.task_id}")
+                deliverable_content_blocks = build_file_section(
+                    body.deliverables_dir,
+                    clean_up_list,
+                    max_bytes=self.config.rubric_max_inline_file_bytes,
+                    max_text_chars=self.config.rubric_max_text_chars_per_file,
+                    skip_converted_pdfs=True,
+                )
 
         task_prompt = body.prompt or ""
         rubric_pretty = body.rubric_pretty or ""
@@ -412,47 +425,52 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # the judge model is expected to be multimodal (configured via
         # ``judge_model_server`` in the benchmark YAML). Falls back to text
         # scoring only when no content blocks could be built.
-        if self.config.rubric_scoring_mode == "structured":
-            from resources_servers.gdpval.scoring import score_with_rubric_structured
+        try:
+            if self.config.rubric_scoring_mode == "structured":
+                from resources_servers.gdpval.scoring import score_with_rubric_structured
 
-            reward, judge_result = await score_with_rubric_structured(
-                deliverable_text=deliverable_text,
-                rubric_json=body.rubric_json,
-                rubric_pretty=rubric_pretty,
-                task_prompt=task_prompt,
-                judges=judges,
-                rng=rng,
-                num_trials=self.config.rubric_structured_num_trials,
-                formatting_retries=self.config.rubric_structured_formatting_retries,
-                deliverable_content_blocks=deliverable_content_blocks,
-                include_raw_responses=self.config.persist_raw_judge_responses,
-            )
-        elif deliverable_content_blocks:
-            from resources_servers.gdpval.scoring import score_with_rubric_visual
+                reward, judge_result = await score_with_rubric_structured(
+                    deliverable_text=deliverable_text,
+                    rubric_json=body.rubric_json,
+                    rubric_pretty=rubric_pretty,
+                    task_prompt=task_prompt,
+                    judges=judges,
+                    rng=rng,
+                    num_trials=self.config.rubric_structured_num_trials,
+                    formatting_retries=self.config.rubric_structured_formatting_retries,
+                    deliverable_content_blocks=deliverable_content_blocks,
+                    include_raw_responses=self.config.persist_raw_judge_responses,
+                )
+            elif deliverable_content_blocks:
+                from resources_servers.gdpval.scoring import score_with_rubric_visual
 
-            reward, judge_result = await score_with_rubric_visual(
-                deliverable_content_blocks=deliverable_content_blocks,
-                rubric_json=body.rubric_json,
-                rubric_pretty=rubric_pretty,
-                task_prompt=task_prompt,
-                judge_prompt_template=self._judge_prompt_fpath,
-                judges=judges,
-                rng=rng,
-                include_raw_responses=self.config.persist_raw_judge_responses,
-            )
-        else:
-            from resources_servers.gdpval.scoring import score_with_rubric
+                reward, judge_result = await score_with_rubric_visual(
+                    deliverable_content_blocks=deliverable_content_blocks,
+                    rubric_json=body.rubric_json,
+                    rubric_pretty=rubric_pretty,
+                    task_prompt=task_prompt,
+                    judge_prompt_template=self._judge_prompt_fpath,
+                    judges=judges,
+                    rng=rng,
+                    include_raw_responses=self.config.persist_raw_judge_responses,
+                )
+            else:
+                from resources_servers.gdpval.scoring import score_with_rubric
 
-            reward, judge_result = await score_with_rubric(
-                deliverable_text=deliverable_text,
-                rubric_json=body.rubric_json,
-                rubric_pretty=rubric_pretty,
-                task_prompt=task_prompt,
-                judge_prompt_template=self._judge_prompt_fpath,
-                judges=judges,
-                rng=rng,
-                include_raw_responses=self.config.persist_raw_judge_responses,
-            )
+                reward, judge_result = await score_with_rubric(
+                    deliverable_text=deliverable_text,
+                    rubric_json=body.rubric_json,
+                    rubric_pretty=rubric_pretty,
+                    task_prompt=task_prompt,
+                    judge_prompt_template=self._judge_prompt_fpath,
+                    judges=judges,
+                    rng=rng,
+                    include_raw_responses=self.config.persist_raw_judge_responses,
+                )
+        finally:
+            from resources_servers.gdpval.comparison import clean_up_paths
+
+            clean_up_paths(clean_up_list)
 
         return GDPValVerifyResponse(
             **body.model_dump(),
