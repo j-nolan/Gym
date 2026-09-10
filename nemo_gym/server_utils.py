@@ -86,6 +86,9 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 
+NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
+NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
+
 
 class _PickleSafeRequestInfo(NamedTuple):
     url: str
@@ -486,7 +489,15 @@ class ServerClient(BaseModel):
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
-        base_url = self._resolve_base_url(server_name)
+        model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
+        model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
+        if model_server_base_url and server_name == model_server_name:
+            # Subprocess agents do not inherit the current rollout context.
+            # The launcher provides a model URL that already contains the rollout prefix.
+            # Use that URL instead of rebuilding it from global server configuration.
+            base_url = model_server_base_url.rstrip("/")
+        else:
+            base_url = self._resolve_base_url(server_name)
 
         json_obj = kwargs.get("json")
         if "json" in kwargs:
@@ -746,13 +757,18 @@ class ClientDisconnectCancellationMiddleware:
 
         received_messages: asyncio.Queue[Message] = asyncio.Queue()
         client_disconnected = asyncio.Event()
+        response_complete = asyncio.Event()
 
         async def receive_message() -> Message:
             return await received_messages.get()
 
         async def send_message(message: Message) -> None:
-            if not client_disconnected.is_set():
-                await send(message)
+            if client_disconnected.is_set():
+                return
+
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_complete.set()
 
         # The listener is the sole reader of the original ASGI receive channel.
         # Forwarding request messages keeps the body available to the app while
@@ -768,10 +784,17 @@ class ClientDisconnectCancellationMiddleware:
             async def listen_for_disconnect() -> None:
                 while True:
                     message = await receive()
-                    await received_messages.put(message)
                     if message["type"] != "http.disconnect":
+                        await received_messages.put(message)
                         continue
 
+                    # Uvicorn returns http.disconnect from receive() once the response is complete,
+                    # even if the peer did not disconnect early. Only cancel requests whose response
+                    # has not finished being sent.
+                    if response_complete.is_set():
+                        return
+
+                    await received_messages.put(message)
                     client_disconnected.set()
                     self.num_cancelled += 1
                     if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:

@@ -227,6 +227,11 @@ async def score_with_rubric(
         return 0.0, None
 
 
+def _is_context_window_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "contextwindowexceeded" in text or "input token count exceeds" in text
+
+
 async def score_with_rubric_visual(
     deliverable_content_blocks: list[dict],
     rubric_json: Any,
@@ -236,6 +241,7 @@ async def score_with_rubric_visual(
     judges: list[ResolvedJudge],
     rng: Optional[random.Random] = None,
     include_raw_responses: bool = False,
+    deliverable_text: str = "",
 ) -> tuple[float, dict | None]:
     """Score deliverables visually using a multimodal judge (e.g., Gemini 3 Pro).
 
@@ -261,7 +267,7 @@ async def score_with_rubric_visual(
         judge_prompt_template,
         task_prompt=task_prompt,
         rubric=rubric_str,
-        deliverable_text="[Deliverable files are attached below as PDFs/images.]",
+        deliverable_text=deliverable_text or "[Deliverable files are attached below as PDFs/images.]",
     )
 
     # Build multimodal content: prompt text + file content blocks
@@ -361,6 +367,20 @@ async def score_with_rubric_visual(
         import traceback
 
         print(f"Visual rubric scoring failed: {e}", flush=True)
+        # The attached deliverables overflowed the judge's input window. Returning 0 here reports
+        # our payload problem as a worthless deliverable, so score the extracted text instead.
+        if _is_context_window_error(e):
+            print("Visual judge input exceeded the context window; scoring text instead", flush=True)
+            return await score_with_rubric(
+                deliverable_text=deliverable_text or "[Deliverable files were too large to attach.]",
+                rubric_json=rubric_json,
+                rubric_pretty=rubric_pretty,
+                task_prompt=task_prompt,
+                judge_prompt_template=judge_prompt_template,
+                judges=judges,
+                rng=rng,
+                include_raw_responses=include_raw_responses,
+            )
         traceback.print_exc()
         return 0.0, None
 

@@ -198,7 +198,7 @@ FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
 }
 
 
-def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
+def get_file_content_block(file_dir: str, file_name: str, max_bytes: int = MAX_FILE_BYTES_FOR_JUDGE) -> dict | None:
     """Return a single OpenAI content block (dict) for a file, or ``None``."""
     file_extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
 
@@ -217,7 +217,7 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
         size_bytes = os.path.getsize(full_path)
     except OSError:
         return None
-    if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
+    if size_bytes > max_bytes:
         size_mb = size_bytes / (1024 * 1024)
         return {
             "type": "text",
@@ -249,7 +249,13 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
     return None
 
 
-def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = None) -> list[dict]:
+def build_file_section(
+    file_dir: str | None,
+    clean_up_list: list[Path] | None = None,
+    max_bytes: int = MAX_FILE_BYTES_FOR_JUDGE,
+    max_text_chars: int | None = None,
+    skip_converted_pdfs: bool = False,
+) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
     Skips files in ``IGNORE_FILES``. Extracts zips into per-call tempdirs
@@ -276,15 +282,27 @@ def build_file_section(file_dir: str | None, clean_up_list: list[Path] | None = 
         if file_name in IGNORE_FILES:
             return
         section.append({"type": "text", "text": f"\n{file_name}:\n"})
-        block = get_file_content_block(directory, file_name)
+        block = get_file_content_block(directory, file_name, max_bytes)
         if block is not None:
+            if max_text_chars is not None and block.get("type") == "text":
+                block = {"type": "text", "text": block["text"][:max_text_chars]}
             section.append(block)
             no_files = False
 
     if file_dir is not None and os.path.exists(file_dir):
-        for file_name in sorted(os.listdir(file_dir)):
+        names = sorted(os.listdir(file_dir))
+        # Preconversion writes ``<stem>.pdf`` beside an office deliverable, and that same PDF is
+        # what the office file renders as, so emitting both sends the judge two copies.
+        rendered_stems = (
+            {Path(n).stem for n in names if FILE_TYPE_MAP.get(n.rsplit(".", 1)[-1].lower(), {}).get("type") == "DOC"}
+            if skip_converted_pdfs
+            else set()
+        )
+        for file_name in names:
             full_path = os.path.join(file_dir, file_name)
             if os.path.isdir(full_path) or file_name.lower().endswith(".zip"):
+                continue
+            if file_name.lower().endswith(".pdf") and Path(file_name).stem in rendered_stems:
                 continue
             _emit(file_dir, file_name)
 

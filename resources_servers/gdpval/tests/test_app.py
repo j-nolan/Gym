@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -290,16 +291,43 @@ class TestApp:
         with (
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
-            # Avoid pulling in real file-reader conversion for the .mp3 stub.
+            # Avoid pulling in real file reading for the .mp3 stub.
             patch("responses_api_agents.stirrup_agent.file_reader.read_deliverable_files", return_value=""),
-            patch(
-                "responses_api_agents.stirrup_agent.file_reader.convert_deliverables_to_content_blocks",
-                return_value=[],
-            ),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
         ):
             await server.verify(body)
 
         assert [j.name for j in captured["judges"]] == ["gemini-3.1-pro"]
+
+    @pytest.mark.asyncio
+    async def test_verify_rubric_sends_zip_members_and_source_files_to_judge(self, tmp_path) -> None:
+        """Rubric mode builds its judge content with build_file_section, so a zip archive and a
+        source file both reach the judge instead of being dropped for their extension."""
+        import zipfile
+
+        deliv = tmp_path / "task_task-1" / "repeat_0"
+        deliv.mkdir(parents=True)
+        (deliv / "handler.ts").write_text("export const handler = () => 1;\n")
+        with zipfile.ZipFile(deliv / "bundle.zip", "w") as zf:
+            zf.writestr("notes.md", "# packaged\n")
+
+        server = _server(reward_mode="rubric")
+        captured: dict = {}
+
+        async def fake_visual(**kwargs):
+            captured.update(kwargs)
+            return 0.5, {"overall_score": 0.5}
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}], deliverables_dir=str(deliv))
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric_visual", side_effect=fake_visual),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            await server.verify(body)
+
+        text = "".join(b.get("text", "") for b in captured["deliverable_content_blocks"])
+        assert "handler.ts" in text and "export const handler" in text
+        assert "notes.md" in text and "# packaged" in text
 
     @pytest.mark.asyncio
     async def test_verify_comparison_missing_reference(self, tmp_path) -> None:
@@ -1317,3 +1345,65 @@ class TestComparisonPayloadHardening:
         assert _is_retryable(RuntimeError("rate limit exceeded")) is True
         # ``timeout`` substring no longer triggers a blind retry.
         assert _is_retryable(RuntimeError("Request timed out")) is False
+
+
+class TestJudgePayloadLimits:
+    """A judge that rejects the payload must not be reported as a worthless deliverable."""
+
+    @pytest.mark.asyncio
+    async def test_context_window_rejection_falls_back_to_text_scoring(self, tmp_path) -> None:
+        from resources_servers.gdpval import scoring
+
+        template = tmp_path / "judge.txt"
+        template.write_text("{task_prompt}\n{rubric}\n{deliverable_text}\n")
+
+        class _RejectingClient:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._raise))
+
+            async def _raise(self, **kwargs):
+                raise RuntimeError(
+                    "litellm.ContextWindowExceededError: The input token count exceeds "
+                    "the maximum number of tokens allowed 1048576."
+                )
+
+        captured: dict = {}
+
+        async def fake_text_scoring(**kwargs):
+            captured.update(kwargs)
+            return 0.7, {"overall_score": 0.7}
+
+        judge = SimpleNamespace(
+            name="j", base_url="http://x/v1", api_key="k", model="m", create_overrides=None, weight=1.0
+        )
+        with (
+            patch("openai.AsyncOpenAI", _RejectingClient),
+            patch("resources_servers.gdpval.scoring._render_template", return_value="judge prompt"),
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_text_scoring),
+        ):
+            reward, result = await scoring.score_with_rubric_visual(
+                deliverable_content_blocks=[{"type": "text", "text": "x"}],
+                rubric_json=[{"criterion": "c", "score": 1}],
+                rubric_pretty="c",
+                task_prompt="do it",
+                judge_prompt_template=str(template),
+                judges=[judge],
+                deliverable_text="the extracted deliverable text",
+            )
+
+        assert reward == 0.7, "a context-window rejection must not score the task zero"
+        assert result == {"overall_score": 0.7}
+        assert captured["deliverable_text"] == "the extracted deliverable text"
+
+    def test_converted_pdf_is_skipped_only_when_asked(self, tmp_path) -> None:
+        """Comparison mode keeps its existing output; rubric mode opts out of the duplicate."""
+        from resources_servers.gdpval.comparison import build_file_section
+
+        (tmp_path / "report.docx").write_bytes(b"PK\x03\x04stub")
+        (tmp_path / "report.pdf").write_bytes(b"%PDF-1.4 stub")
+
+        def pdf_blocks(section):
+            return [b for b in section if b.get("type") == "image_url"]
+
+        assert len(pdf_blocks(build_file_section(str(tmp_path)))) == 2
+        assert len(pdf_blocks(build_file_section(str(tmp_path), skip_converted_pdfs=True))) == 1

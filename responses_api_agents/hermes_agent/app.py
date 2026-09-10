@@ -42,8 +42,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentObservationBundle,
@@ -63,6 +66,16 @@ def _trajectory_to_output_items(messages, n_input):
         if isinstance(content, list):
             content = "".join(c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "") for c in content)
         if role == "assistant":
+            reasoning_text = item.get("reasoning") or ""
+            if reasoning_text:
+                content = ResponsesConverter._parse_think_tags(content)[1]
+                output_items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rsn-{len(output_items)}",
+                        summary=[NeMoGymSummary(type="summary_text", text=reasoning_text)],
+                        type="reasoning",
+                    )
+                )
             output_items.append(
                 NeMoGymResponseOutputMessageForTraining(
                     id=f"msg-{len(output_items)}",
@@ -166,6 +179,15 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     temperature: float | None = None
     terminal_backend: str = "local"
     terminal_timeout: int = 180
+    # hermes-agent picks its non-stream stale timeout from an allowlist keyed on the model name.
+    # It never matches here: the name it receives is model_server.name ("policy_model"), not the
+    # served model, so every model silently falls back to the 90s chat default and long reasoning
+    # turns are abandoned mid-flight. Setting it explicitly outranks that lookup; left unset the
+    # harness keeps its own default.
+    api_call_stale_timeout: Optional[int] = None
+    # Hermes caps web_search calls per turn (default 50). A benchmark that runs a whole task as
+    # one turn hits it as a whole-task ceiling, and tripping it ends the turn. 0 disables.
+    max_web_searches_per_turn: Optional[int] = None
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
@@ -173,6 +195,9 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     api_key: Optional[str] = None
     delegation_max_iterations: int = 50
     checkpoints_enabled: bool = False
+    # Declares the served model able to read images. Off by default: a model that cannot would
+    # be handed pictures it must reject.
+    supports_vision: bool = False
 
 
 class HermesAgentRunRequest(BaseRunRequest):
@@ -195,6 +220,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     # Set of agents currently running run_conversation, plus a flag tracking whether the single
     # shared SIGTERM dispatcher has been installed on the event loop. See _ensure_sigterm_handler.
     active_agents: set = None
+    interrupted_agents: set = None
     sigterm_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -210,6 +236,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         def _dispatch():
             for ag in list(self.active_agents):
+                self.interrupted_agents.add(id(ag))
                 if hasattr(ag, "interrupt"):
                     ag.interrupt("timeout")
 
@@ -224,7 +251,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         config: dict[str, Any] = {
             "model": self._model_name(),
-            "provider": "auto",
+            # Not "auto" or "vllm": hermes gates images in tool results on an allowlist of
+            # provider names (tools/vision_tools.py::_supports_media_in_tool_results), and only
+            # "openai" matches what gym actually fronts, an OpenAI-compatible chat endpoint.
+            # Anything else silently downgrades images to a text description.
+            "provider": "openai",
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
             "memory": {
@@ -246,15 +277,22 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
+        if self.config.max_web_searches_per_turn is not None:
+            config["tool_loop_guardrails"] = {"loop_caps": {"max_web_searches": self.config.max_web_searches_per_turn}}
+        if self.config.supports_vision:
+            config["providers"] = {"openai": self._vision_provider_config()}
         return yaml.dump(config, default_flow_style=False)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
         self.active_agents = set()
+        self.interrupted_agents = set()
         # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
         # process-global, so multiple HermesAgent instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend
         os.environ["TERMINAL_TIMEOUT"] = str(self.config.terminal_timeout)
+        if self.config.api_call_stale_timeout is not None:
+            os.environ["HERMES_API_CALL_STALE_TIMEOUT"] = str(self.config.api_call_stale_timeout)
 
         # Build config.yaml with config parameters
         hermes_home = tempfile.mkdtemp(prefix="hermes_agent_")
@@ -262,6 +300,39 @@ class HermesAgent(SimpleResponsesAPIAgent):
         with open(os.path.join(hermes_home, "config.yaml"), "w") as _f:
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
+
+    def _vision_provider_config(self) -> dict[str, Any]:
+        """Provider entry that lets ``vision_analyze`` register.
+
+        The tool is gated on ``check_vision_requirements()``, which asks whether a vision client
+        could be built. Declaring the capability is necessary but not sufficient: our served
+        checkpoints are absent from the models.dev catalogue, so without ``supports_vision`` the
+        probe skips the policy model and falls through to third-party vision providers we hold no
+        credentials for; and without an endpoint it cannot construct a client either, because the
+        probe runs before the live endpoint is recorded. Verified both ways: capability alone
+        leaves the check False, capability plus endpoint makes it True.
+        """
+        entry: dict[str, Any] = {"models": {self._model_name(): {"supports_vision": True}}}
+        entry["api_key"] = self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym")  # pragma: allowlist secret
+        base_url = self._vision_base_url()
+        if base_url:
+            entry["base_url"] = base_url
+        else:
+            LOG.warning("no model base url for the vision probe; vision_analyze will not register")
+        return entry
+
+    def _vision_base_url(self) -> Optional[str]:
+        if self.config.model_server is None:
+            return None
+        try:
+            return self.resolve_model_base_url(self.config.model_server.name)
+        except Exception:
+            # A sandboxed run constructs the agent with an empty global config, so the server
+            # lookup raises KeyError. The injected client still knows the endpoint it was given.
+            try:
+                return self.server_client._build_server_base_url({})
+            except Exception:
+                return None
 
     def _model_name(self) -> str:
         return self.config.model or str(self.config.model_server.name)
@@ -334,10 +405,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
         # instead of being killed mid-turn (which would leave response.json unwritten). A single
         # shared dispatcher interrupts every in-flight agent; we just register this one in the set.
         self._ensure_sigterm_handler()
+        agent_id = id(agent)
         self.active_agents.add(agent)
 
         result = None
         agent_error: Optional[BaseException] = None
+        interrupted_by_dispatch = False
         try:
             result = await asyncio.to_thread(
                 agent.run_conversation,
@@ -350,6 +423,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             raise
         finally:
             self.active_agents.discard(agent)
+            interrupted_by_dispatch = agent_id in self.interrupted_agents
+            self.interrupted_agents.discard(agent_id)
             if observation_collector is not None:
                 try:
                     observations = (
@@ -412,12 +487,47 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 )
             )
 
+        # The agent ran out of turns / blew its context window if run_conversation reports it did
+        # not complete (api_call_count >= max_iterations). Mark the response incomplete so a
+        # downstream consumer (e.g. anyswe) can mask an accidental pass instead of scoring it 1.0.
+        agent_completed = bool(result.get("completed", True))
+
+        # Expose harness run outcome fields for diagnosability
+        was_interrupted = bool(result.get("interrupted")) or interrupted_by_dispatch
+
+        harness_error = result.get("error")
+        agent_failed = bool(harness_error) or bool(result.get("failed"))
+        metadata: dict[str, str] = {
+            "interrupted": "true" if was_interrupted else "false",
+            # `failed` = the underlying run flagged an API/provider failure (bad response shape,
+            # rate limit, unrecoverable truncation) — the clean signal for an infra failure vs a
+            # legitimate stop. `partial` = the response was truncated at the output-token limit.
+            "failed": "true" if result.get("failed") else "false",
+            "partial": "true" if result.get("partial") else "false",
+        }
+        # Turn count is `api_calls` in the result dict (present on every return).
+        if isinstance(result.get("api_calls"), int):
+            metadata["turns"] = str(result["api_calls"])
+        if harness_error:
+            metadata["hermes_error"] = str(harness_error)[:2000]
+
+        # Populate the structured error field too. `code` must be one of OpenAI's Literals, so we
+        # use the generic "server_error"; the real text lives in `message`.
+        response_error = None
+        if harness_error:
+            from openai.types.responses import ResponseError  # pyright: ignore[reportMissingImports]
+
+            response_error = ResponseError(code="server_error", message=str(harness_error)[:2000])
+
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
             object="response",
             output=output_items,
+            status="failed" if agent_failed else ("completed" if agent_completed else "incomplete"),
+            error=response_error,
+            metadata=metadata,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,

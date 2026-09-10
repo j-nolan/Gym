@@ -985,8 +985,10 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 
 
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
-    # Override the iterable which is annoying to work with.
-    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Override the iterable which is annoying to work with. Text-only content rejects the whole
+    # conversation the first time a vision tool returns a picture, so accept what a user message
+    # accepts.
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartParam]]]
     # Absent from the OpenAI type but sent by real clients and accepted by real servers.
     # Without it the request schema rejects the whole conversation, so an agent that calls a
     # tool cannot receive the result.
@@ -1079,7 +1081,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     internal: bool = Field(
         default=False,
-        description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
+        description="Set this to true for internal NeMo Gym servers, which may retry indefinitely.",
     )
 
     max_connection_retries: Optional[int] = Field(
@@ -1096,8 +1098,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        request_headers = request_kwargs.pop("headers", {})
         request_kwargs = request_kwargs | {
             "headers": self.default_headers
+            | request_headers
             | {
                 "Authorization": f"Bearer {self.api_key}",
             },
@@ -1114,8 +1118,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
-                if response.status in RATE_LIMIT_ERROR_CODES:
+                # Internal NeMo Gym servers extend max tries for retryable errors.
+                if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                     max_num_tries += 1
 
                 content = (await response.content.read()).decode()
