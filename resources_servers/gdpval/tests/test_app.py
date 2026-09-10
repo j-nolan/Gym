@@ -1350,6 +1350,51 @@ class TestComparisonPayloadHardening:
 class TestJudgePayloadLimits:
     """A judge that rejects the payload must not be reported as a worthless deliverable."""
 
+    @pytest.mark.asyncio
+    async def test_context_window_rejection_falls_back_to_text_scoring(self, tmp_path) -> None:
+        from resources_servers.gdpval import scoring
+
+        template = tmp_path / "judge.txt"
+        template.write_text("{task_prompt}\n{rubric}\n{deliverable_text}\n")
+
+        class _RejectingClient:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._raise))
+
+            async def _raise(self, **kwargs):
+                raise RuntimeError(
+                    "litellm.ContextWindowExceededError: The input token count exceeds "
+                    "the maximum number of tokens allowed 1048576."
+                )
+
+        captured: dict = {}
+
+        async def fake_text_scoring(**kwargs):
+            captured.update(kwargs)
+            return 0.7, {"overall_score": 0.7}
+
+        judge = SimpleNamespace(
+            name="j", base_url="http://x/v1", api_key="k", model="m", create_overrides=None, weight=1.0
+        )
+        with (
+            patch("openai.AsyncOpenAI", _RejectingClient),
+            patch("resources_servers.gdpval.scoring._render_template", return_value="judge prompt"),
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_text_scoring),
+        ):
+            reward, result = await scoring.score_with_rubric_visual(
+                deliverable_content_blocks=[{"type": "text", "text": "x"}],
+                rubric_json=[{"criterion": "c", "score": 1}],
+                rubric_pretty="c",
+                task_prompt="do it",
+                judge_prompt_template=str(template),
+                judges=[judge],
+                deliverable_text="the extracted deliverable text",
+            )
+
+        assert reward == 0.7, "a context-window rejection must not score the task zero"
+        assert result == {"overall_score": 0.7}
+        assert captured["deliverable_text"] == "the extracted deliverable text"
+
     def test_converted_pdf_is_skipped_only_when_asked(self, tmp_path) -> None:
         """Comparison mode keeps its existing output; rubric mode opts out of the duplicate."""
         from resources_servers.gdpval.comparison import build_file_section
